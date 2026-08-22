@@ -1,6 +1,7 @@
 package com.goofy.goofyaddons.render.hud;
 
 import com.goofy.goofyaddons.GoofyAddons;
+import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.bookflipper.BazaarFlipper;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
@@ -14,17 +15,20 @@ import net.minecraft.resources.Identifier;
 import java.util.List;
 
 /**
- * Persistent HUD overlay showing live BazaarFlipper macro status (state, active book,
- * per-book task progress). Same pattern as EconomyHud: registered once via
- * HudElementRegistry so it renders every frame, on top of the world and around
- * container screens - it is NOT a Screen you open/close.
+ * ESKİ ARAYÜZ - ŞU AN DEVRE DIŞI.
+ *
+ * Eskiden G tuşuyla açılıp kapanan, makro durumunu ve görev listesini gösteren
+ * overlay. Yerini M tuşuyla açılan GoofyScreen aldı. Sınıf bilerek silinmedi:
+ * ileride tekrar istenirse GoofyAddonsClient içindeki GoofyOverlay.register()
+ * satırını geri açmak yeterli.
+ *
+ * Konumu artık yeni Profit HUD'un altına hizalanıyor (HUD taşınınca bu da taşınır).
  */
 public class GoofyOverlay {
 
     private static final Identifier HEADER = Identifier.fromNamespaceAndPath(GoofyAddons.MOD_ID, "textures/gui/header.png");
 
-    private static final int PANEL_X = 6;
-    private static final int PANEL_GAP = 6; // EconomyHud panelinin altındaki boşluk
+    private static final int PANEL_GAP = 6;
     private static final int PANEL_WIDTH = 220;
     private static final int HEADER_WIDTH = 160;
     private static final int HEADER_HEIGHT = HEADER_WIDTH * 192 / 1195;
@@ -36,13 +40,13 @@ public class GoofyOverlay {
     private GoofyOverlay() {
     }
 
-    /**
-     * ESKİ KOD: PANEL_Y sabit 58'di ve EconomyHud'un 3 satırlık yüksekliğine göre
-     * elle hesaplanmıştı. EconomyHud'a uptime + mod satırı eklenince paneller üst
-     * üste biniyordu; artık konum ekonomi panelinin gerçek yüksekliğinden türetiliyor.
-     */
+    private static int panelX() {
+        return GoofyConfig.INSTANCE == null ? 8 : GoofyConfig.INSTANCE.hudX;
+    }
+
     private static int panelY() {
-        return EconomyHud.PANEL_Y + EconomyHud.getPanelHeight() + PANEL_GAP;
+        int hudY = GoofyConfig.INSTANCE == null ? 8 : GoofyConfig.INSTANCE.hudY;
+        return hudY + EconomyHud.HEIGHT + PANEL_GAP;
     }
 
     public static void register() {
@@ -74,17 +78,18 @@ public class GoofyOverlay {
             taskLines = flipper.getTaskSummary();
         }
 
+        int panelX = panelX();
         int panelY = panelY();
         int contentLines = 2 + Math.max(taskLines.size(), 1);
         int panelHeight = HEADER_HEIGHT + PADDING * 3 + (LINE_HEIGHT * contentLines);
 
-        graphics.fill(PANEL_X, panelY, PANEL_X + PANEL_WIDTH, panelY + panelHeight, 0x90252525);
-        graphics.outline(PANEL_X, panelY, PANEL_WIDTH, panelHeight, 0xFF000000);
+        graphics.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + panelHeight, 0x90252525);
+        graphics.outline(panelX, panelY, PANEL_WIDTH, panelHeight, 0xFF000000);
 
         graphics.blit(
                 RenderPipelines.GUI_TEXTURED,
                 HEADER,
-                PANEL_X + (PANEL_WIDTH - HEADER_WIDTH) / 2,
+                panelX + (PANEL_WIDTH - HEADER_WIDTH) / 2,
                 panelY + PADDING,
                 0, 0,
                 HEADER_WIDTH, HEADER_HEIGHT,
@@ -92,7 +97,7 @@ public class GoofyOverlay {
                 1195, 192
         );
 
-        int textX = PANEL_X + PADDING;
+        int textX = panelX + PADDING;
         int textY = panelY + PADDING * 2 + HEADER_HEIGHT;
 
         int statusColor = running ? 0xFF55FF55 : 0xFFFF5555;
