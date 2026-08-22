@@ -1,8 +1,11 @@
 package com.goofy.goofyaddons.render.hud;
 
 import com.goofy.goofyaddons.GoofyAddons;
+import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.economy.EconomyTracker;
+import com.goofy.goofyaddons.ui.Draw;
+import com.goofy.goofyaddons.ui.Theme;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.minecraft.client.DeltaTracker;
@@ -14,13 +17,11 @@ import java.text.NumberFormat;
 import java.util.Locale;
 
 /**
- * Persistent HUD overlay (not a Screen you open/close) showing running bazaar economy stats:
- * spend, earn, clean profit ve makro uptime'ı. Registered once on client init and rendered
- * every frame via HudElementRegistry, so it stays on screen at all times.
+ * Profit HUD - yeniden tasarlandı.
  *
- * Gösterilen değerler aktif moda göre değişir (V tuşu):
- *  - All-time : mod kurulduğundan beri toplam (diske yazılır)
- *  - Session  : sadece bu oyun oturumu
+ * Tek bir koyu kart: üstte durum ışığı + mod etiketi, ortada büyük PROFIT rakamı,
+ * altta spend/earn ve uptime. Konum config'ten (hudX/hudY) okunur, Move HUD
+ * ekranından sürükle-bırak ile değiştirilir.
  */
 public class EconomyHud {
 
@@ -30,81 +31,74 @@ public class EconomyHud {
         FORMAT.setMaximumFractionDigits(0);
     }
 
-    public static final int PANEL_X = 6;
-    public static final int PANEL_Y = 6;
-    private static final int PANEL_WIDTH = 200;
-    private static final int LINE_HEIGHT = 12;
-    private static final int PADDING = 6;
-    private static final int LINE_COUNT = 5; // mod basligi + spend + earn + profit + uptime
-
-    private static final int COLOR_ALL_TIME = 0xFFFFAA00;
-    private static final int COLOR_SESSION = 0xFF55FFFF;
-    private static final int COLOR_HINT = 0xFF777777;
-    private static final int COLOR_SPEND = 0xFFFF5555;
-    private static final int COLOR_EARN = 0xFF55FF55;
-    private static final int COLOR_UPTIME_ACTIVE = 0xFFDDDDDD;
-    private static final int COLOR_UPTIME_IDLE = 0xFF888888;
+    public static final int WIDTH = 132;
+    public static final int HEIGHT = 62;
 
     private EconomyHud() {
-    }
-
-    /** GoofyOverlay kendi konumunu bu panelin altına hizalamak için kullanır. */
-    public static int getPanelHeight() {
-        return (LINE_HEIGHT * LINE_COUNT) + (PADDING * 2) - 2;
     }
 
     public static void register() {
         HudElementRegistry.attachElementBefore(
                 VanillaHudElements.CHAT,
                 Identifier.fromNamespaceAndPath(GoofyAddons.MOD_ID, "economy_hud"),
-                EconomyHud::render
+                EconomyHud::renderElement
         );
     }
 
-    private static void render(GuiGraphicsExtractor graphics, DeltaTracker tickCounter) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.player == null) return;
+    private static void renderElement(GuiGraphicsExtractor graphics, DeltaTracker tickCounter) {
+        if (GoofyConfig.INSTANCE == null || !GoofyConfig.INSTANCE.hudVisible) return;
+        if (Minecraft.getInstance().player == null) return;
+        // Move HUD ekranı kendi önizlemesini çizer, iki kez çizmeyelim.
+        if (Minecraft.getInstance().screen instanceof com.goofy.goofyaddons.ui.HudEditScreen) return;
 
-        double spend = EconomyTracker.getSpend();
-        double earn = EconomyTracker.getEarn();
-        double profit = EconomyTracker.getProfit();
-        long uptimeMs = EconomyTracker.getUptimeMs();
+        render(graphics, GoofyConfig.INSTANCE.hudX, GoofyConfig.INSTANCE.hudY, false);
+    }
 
-        int panelHeight = getPanelHeight();
-
-        graphics.fill(PANEL_X, PANEL_Y, PANEL_X + PANEL_WIDTH, PANEL_Y + panelHeight, 0x90252525);
-        graphics.outline(PANEL_X, PANEL_Y, PANEL_WIDTH, panelHeight, 0xFF000000);
-
-        int textX = PANEL_X + PADDING;
-        int textY = PANEL_Y + PADDING;
-
-        // 1) Aktif mod + V ipucu
-        String modeLabel = "Economy: " + EconomyTracker.getModeLabel();
-        int modeColor = EconomyTracker.getMode() == EconomyTracker.Mode.SESSION ? COLOR_SESSION : COLOR_ALL_TIME;
-        graphics.text(minecraft.font, modeLabel, textX, textY, modeColor, false);
-        graphics.text(minecraft.font, " [V]", textX + minecraft.font.width(modeLabel), textY, COLOR_HINT, false);
-        textY += LINE_HEIGHT;
-
-        // 2-4) Para
-        graphics.text(minecraft.font, "Spend: " + FORMAT.format(spend), textX, textY, COLOR_SPEND, false);
-        textY += LINE_HEIGHT;
-
-        graphics.text(minecraft.font, "Earn: " + FORMAT.format(earn), textX, textY, COLOR_EARN, false);
-        textY += LINE_HEIGHT;
-
-        int profitColor = profit >= 0 ? COLOR_SESSION : COLOR_SPEND;
-        graphics.text(minecraft.font, "Profit: " + FORMAT.format(profit), textX, textY, profitColor, false);
-        textY += LINE_HEIGHT;
-
-        // 5) Uptime - sayacın şu an ilerleyip ilerlemediğini de gösterir
+    /**
+     * HUD'u verilen konuma çizer. Move HUD ekranı da bunu çağırır (highlight = true
+     * iken taşınabilir olduğunu belli eden bir çerçeve eklenir).
+     */
+    public static void render(GuiGraphicsExtractor g, int x, int y, boolean highlight) {
         boolean counting = EconomyTracker.isCountingUptime();
-        String suffix = counting
-                ? ""
-                : (FeatureManager.INSTANCE.isMacroRunning() ? " (paused)" : " (stopped)");
-        graphics.text(minecraft.font,
-                "Uptime: " + EconomyTracker.formatUptime(uptimeMs) + suffix,
-                textX, textY,
-                counting ? COLOR_UPTIME_ACTIVE : COLOR_UPTIME_IDLE,
-                false);
+        boolean running = FeatureManager.INSTANCE.isMacroRunning();
+        boolean paused = FeatureManager.INSTANCE.isPaused();
+
+        double profit = EconomyTracker.getProfit();
+        int accent = profit >= 0 ? Theme.GREEN : Theme.RED;
+
+        // gövde
+        Draw.panel(g, x, y, WIDTH, HEIGHT, Theme.HUD_BG, highlight ? Theme.ACCENT : Theme.HUD_STROKE);
+        // sol kenarda ince vurgu şeridi - kâr pozitifse yeşil, negatifse kırmızı
+        Draw.rect(g, x + 1, y + 2, 2, HEIGHT - 4, accent);
+
+        int px = x + 9;
+        int py = y + 6;
+
+        // --- üst satır: durum ışığı + mod ---
+        int statusColor = !running ? Theme.TEXT_FAINT : (paused ? Theme.YELLOW : Theme.GREEN);
+        Draw.dot(g, px, py + 2, statusColor);
+        Draw.text(g, EconomyTracker.getModeLabel().toUpperCase(), px + 9, py, Theme.TEXT_DIM);
+        Draw.textRight(g, counting ? "LIVE" : (running ? "PAUSED" : "IDLE"),
+                x + WIDTH - 8, py, counting ? Theme.ACCENT : Theme.TEXT_FAINT);
+
+        // --- ana rakam ---
+        py += 13;
+        String profitText = (profit >= 0 ? "+" : "") + FORMAT.format(profit);
+        Draw.text(g, profitText, px, py, accent);
+
+        // --- alt: spend / earn ---
+        py += 13;
+        Draw.text(g, "SPEND", px, py, Theme.TEXT_FAINT);
+        Draw.textRight(g, FORMAT.format(EconomyTracker.getSpend()), x + WIDTH - 8, py, Theme.TEXT_DIM);
+
+        py += 10;
+        Draw.text(g, "EARN", px, py, Theme.TEXT_FAINT);
+        Draw.textRight(g, FORMAT.format(EconomyTracker.getEarn()), x + WIDTH - 8, py, Theme.TEXT_DIM);
+
+        // --- uptime ---
+        py += 10;
+        Draw.text(g, "UPTIME", px, py, Theme.TEXT_FAINT);
+        Draw.textRight(g, EconomyTracker.formatUptime(EconomyTracker.getUptimeMs()),
+                x + WIDTH - 8, py, counting ? Theme.TEXT : Theme.TEXT_FAINT);
     }
 }
