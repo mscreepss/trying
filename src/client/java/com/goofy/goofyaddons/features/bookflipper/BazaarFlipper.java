@@ -7,6 +7,7 @@ import com.goofy.goofyaddons.features.bookflipper.helper.BazaarMonitor;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipCalculator;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipItem;
+import com.goofy.goofyaddons.ui.GoofyGui;
 import com.goofy.goofyaddons.utils.*;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractSignEditScreen;
@@ -1406,9 +1407,18 @@ public class BazaarFlipper implements Feature {
 
 
     private boolean containerCheck(String name) {
-        if (minecraft.screen == null) return false;
+        if (minecraft.screen == null || isOwnScreen()) return false;
         String title = minecraft.screen.getTitle().getString();
         return title.toLowerCase().contains(name.toLowerCase());
+    }
+
+    /**
+     * GoofyAddons'un kendi arayüzü (M menüsü, HUD taşıma) açıkken makro bunu bir
+     * bazaar/depo konteyneri sanmamalı. Menü açılınca makro zaten duraklatılıyor,
+     * bu ikinci emniyet kemeri.
+     */
+    private boolean isOwnScreen() {
+        return minecraft.screen instanceof GoofyGui;
     }
 
     /**
@@ -1423,8 +1433,7 @@ public class BazaarFlipper implements Feature {
     }
 
     private boolean isContainerOpen() {
-        if (minecraft.screen == null) return false;
-        return true;
+        return minecraft.screen != null && !isOwnScreen();
     }
 
     private void handleClaimedMessage(String string) {
@@ -1470,12 +1479,16 @@ public class BazaarFlipper implements Feature {
     }
 
     private int randomizer() {
-        int result = splittableRandom.nextInt(GoofyConfig.INSTANCE.minActionDelay, GoofyConfig.INSTANCE.maxActionDelay);
+        int min = GoofyConfig.INSTANCE.minActionDelay;
+        int max = GoofyConfig.INSTANCE.maxActionDelay;
 
-        if (result > 50) {
-            return result;
-        }
+        // KRİTİK: Delay'ler artık arayüzden elle girilebiliyor. nextInt(min, max)
+        // max <= min iken IllegalArgumentException fırlatır ve bu HER TICK olur -
+        // makro anında çöker. Bozuk aralıkta sabit bir değere düşüyoruz.
+        if (max <= min) return Math.max(50, min);
 
+        int result = splittableRandom.nextInt(min, max);
+        if (result > 50) return result;
         return 500;
     }
 
