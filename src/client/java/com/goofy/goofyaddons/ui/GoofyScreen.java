@@ -6,7 +6,11 @@ import com.goofy.goofyaddons.features.bookflipper.BazaarFlipper;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
 import com.goofy.goofyaddons.keybinds.GoofyKeybinds;
 import com.goofy.goofyaddons.keybinds.KeyAction;
+import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.input.CharacterEvent;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -71,6 +75,12 @@ public class GoofyScreen extends Screen implements GoofyGui {
     private Widgets.Button addBookButton;
 
     private BookForm modal = null;
+
+    // Yeni girdi API'sinde mouseClicked artik koordinat almiyor (MouseButtonEvent
+    // aliyor ve alan adlari sürüme göre degisebiliyor). Konumu her karede render'dan
+    // yakalayip burada tutuyoruz - tiklama aninda en guncel deger zaten budur.
+    private int lastMouseX = 0;
+    private int lastMouseY = 0;
 
     public GoofyScreen() {
         super(Component.literal("GoofyAddons"));
@@ -272,8 +282,21 @@ public class GoofyScreen extends Screen implements GoofyGui {
     // Çizim
     // =====================================================================
 
-    @Override
+    // Bu surumde Screen#render'in son parametresi float mu DeltaTracker mi degisebiliyor.
+    // Iki asiri yukleme de tanimli: hangisi ust siniftaki imzayla eslesirse o cagrilir,
+    // digeri sadece durur. @Override bilerek yok - yanlis olani derlemeyi kilitlemesin.
     public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        draw(graphics, mouseX, mouseY);
+    }
+
+    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, DeltaTracker deltaTracker) {
+        draw(graphics, mouseX, mouseY);
+    }
+
+    private void draw(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
+        lastMouseX = mouseX;
+        lastMouseY = mouseY;
+
         Draw.rect(graphics, 0, 0, this.width, this.height, Theme.SCRIM);
 
         Draw.panel(graphics, left, top, winW, winH, Theme.WINDOW, Theme.STROKE);
@@ -477,13 +500,20 @@ public class GoofyScreen extends Screen implements GoofyGui {
     // =====================================================================
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (modal != null) return modal.mouseClicked(mouseX, mouseY, button);
-        if (button != 0) return super.mouseClicked(mouseX, mouseY, button);
+    public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        handleClick(lastMouseX, lastMouseY);
+        return true;
+    }
+
+    private void handleClick(double mouseX, double mouseY) {
+        if (modal != null) {
+            modal.mouseClicked(mouseX, mouseY, 0);
+            return;
+        }
 
         if (Draw.inside(mouseX, mouseY, closeX, closeY, closeSize, closeSize)) {
             onClose();
-            return true;
+            return;
         }
 
         Tab[] tabs = Tab.values();
@@ -491,36 +521,39 @@ public class GoofyScreen extends Screen implements GoofyGui {
             if (Draw.inside(mouseX, mouseY, tabX, tabY + i * tabGap, tabW, tabH)) {
                 activeTab = tabs[i];
                 capturing = null;
-                clearFocus();
-                return true;
+                clearBoxFocus();
+                return;
             }
         }
 
-        return activeTab == Tab.CONTROLS ? controlsClicked(mouseX, mouseY) : configClicked(mouseX, mouseY);
+        if (activeTab == Tab.CONTROLS) {
+            controlsClicked(mouseX, mouseY);
+        } else {
+            configClicked(mouseX, mouseY);
+        }
     }
 
-    private boolean controlsClicked(double mouseX, double mouseY) {
+    private void controlsClicked(double mouseX, double mouseY) {
         for (Widgets.Button b : macroButtons) {
-            if (b.mouseClicked(mouseX, mouseY)) return true;
+            if (b.mouseClicked(mouseX, mouseY)) return;
         }
 
         KeyAction[] actions = KeyAction.values();
         for (int i = 0; i < actions.length; i++) {
             if (Draw.inside(mouseX, mouseY, keyBoxX, keyRowsY + i * keyRowH, keyBoxW, keyBoxH)) {
                 capturing = (capturing == actions[i]) ? null : actions[i];
-                return true;
+                return;
             }
         }
         capturing = null;
-        return true;
     }
 
-    private boolean configClicked(double mouseX, double mouseY) {
+    private void configClicked(double mouseX, double mouseY) {
         GoofyConfig config = GoofyConfig.INSTANCE;
-        if (config == null || addBookButton == null) return true;
+        if (config == null || addBookButton == null) return;
 
-        if (addBookButton.mouseClicked(mouseX, mouseY)) return true;
-        if (speedToggle.mouseClicked(mouseX, mouseY)) return true;
+        if (addBookButton.mouseClicked(mouseX, mouseY)) return;
+        if (speedToggle.mouseClicked(mouseX, mouseY)) return;
 
         for (Widgets.TextBox box : settingBoxes) box.mouseClicked(mouseX, mouseY);
 
@@ -531,14 +564,13 @@ public class GoofyScreen extends Screen implements GoofyGui {
 
             if (Draw.inside(mouseX, mouseY, editBtnX, ry + 5, editBtnW, rowBtnH)) {
                 openModal(config.books.get(index), index);
-                return true;
+                return;
             }
             if (Draw.inside(mouseX, mouseY, delBtnX, ry + 5, delBtnW, rowBtnH)) {
                 GoofyConfig.removeBook(index);
-                return true;
+                return;
             }
         }
-        return true;
     }
 
     @Override
@@ -552,7 +584,13 @@ public class GoofyScreen extends Screen implements GoofyGui {
     }
 
     @Override
-    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+    public boolean keyPressed(KeyEvent event) {
+        int keyCode = Events.keyCode(event);
+        if (handleKey(keyCode)) return true;
+        return super.keyPressed(event);
+    }
+
+    private boolean handleKey(int keyCode) {
         if (modal != null) return modal.keyPressed(keyCode);
 
         // Tuş atama modu: bir sonraki tuş atanır, ESC atamayı kaldırır.
@@ -573,16 +611,19 @@ public class GoofyScreen extends Screen implements GoofyGui {
             return true;
         }
 
-        return super.keyPressed(keyCode, scanCode, modifiers);
+        return false;
     }
 
     @Override
-    public boolean charTyped(char chr, int modifiers) {
+    public boolean charTyped(CharacterEvent event) {
+        char chr = Events.character(event);
+        if (chr == 0) return super.charTyped(event);
+
         if (modal != null) return modal.charTyped(chr);
         for (Widgets.TextBox box : settingBoxes) {
             if (box.charTyped(chr)) return true;
         }
-        return super.charTyped(chr, modifiers);
+        return super.charTyped(event);
     }
 
     private boolean anyBoxFocused() {
@@ -592,7 +633,7 @@ public class GoofyScreen extends Screen implements GoofyGui {
         return false;
     }
 
-    private void clearFocus() {
+    private void clearBoxFocus() {
         for (Widgets.TextBox box : settingBoxes) box.focused = false;
     }
 }
