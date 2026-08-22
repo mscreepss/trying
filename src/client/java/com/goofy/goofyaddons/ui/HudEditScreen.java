@@ -3,7 +3,9 @@ package com.goofy.goofyaddons.ui;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.render.hud.EconomyHud;
+import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -16,6 +18,10 @@ public class HudEditScreen extends Screen implements GoofyGui {
     private boolean dragging = false;
     private int grabOffsetX = 0;
     private int grabOffsetY = 0;
+
+    // Yeni girdi API'sinde tiklama koordinat tasimiyor; konumu render'dan yakaliyoruz.
+    private int lastMouseX = 0;
+    private int lastMouseY = 0;
 
     public HudEditScreen() {
         super(Component.literal("GoofyAddons HUD"));
@@ -38,8 +44,20 @@ public class HudEditScreen extends Screen implements GoofyGui {
         return false;
     }
 
-    @Override
+    // Screen#render son parametresi float mu DeltaTracker mi degisebiliyor:
+    // iki asiri yukleme de var, hangisi eslesirse o cagrilir. @Override bilerek yok.
     public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        draw(graphics, mouseX, mouseY);
+    }
+
+    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, DeltaTracker deltaTracker) {
+        draw(graphics, mouseX, mouseY);
+    }
+
+    private void draw(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
+        lastMouseX = mouseX;
+        lastMouseY = mouseY;
+
         Draw.rect(graphics, 0, 0, this.width, this.height, Theme.SCRIM);
 
         // ekran ortasına yardım metni
@@ -66,26 +84,26 @@ public class HudEditScreen extends Screen implements GoofyGui {
     }
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+    public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         GoofyConfig config = GoofyConfig.INSTANCE;
-        if (config != null && button == 0
-                && Draw.inside(mouseX, mouseY, config.hudX, config.hudY, EconomyHud.WIDTH, EconomyHud.HEIGHT)) {
+        if (config != null
+                && Draw.inside(lastMouseX, lastMouseY, config.hudX, config.hudY, EconomyHud.WIDTH, EconomyHud.HEIGHT)) {
             dragging = true;
-            grabOffsetX = (int) mouseX - config.hudX;
-            grabOffsetY = (int) mouseY - config.hudY;
+            grabOffsetX = lastMouseX - config.hudX;
+            grabOffsetY = lastMouseY - config.hudY;
             return true;
         }
-        return super.mouseClicked(mouseX, mouseY, button);
+        return super.mouseClicked(event, doubleClick);
     }
 
     @Override
-    public boolean mouseReleased(double mouseX, double mouseY, int button) {
-        if (dragging && button == 0) {
+    public boolean mouseReleased(MouseButtonEvent event) {
+        if (dragging) {
             dragging = false;
             GoofyConfig.save();
             return true;
         }
-        return super.mouseReleased(mouseX, mouseY, button);
+        return super.mouseReleased(event);
     }
 
     private static int clamp(int value, int min, int max) {
