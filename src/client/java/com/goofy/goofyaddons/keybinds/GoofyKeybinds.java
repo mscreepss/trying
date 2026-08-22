@@ -30,12 +30,13 @@ public final class GoofyKeybinds {
         if (minecraft.getWindow() == null) return;
         if (GoofyConfig.INSTANCE == null) return;
 
-        long window = minecraft.getWindow().getWindow();
+        // Bu surumde InputConstants.isKeyDown dogrudan Window nesnesi aliyor
+        // (eskiden GLFW pencere handle'i olan long aliyordu).
         boolean screenOpen = minecraft.screen != null;
 
         for (KeyAction action : KeyAction.values()) {
             int code = action.getKey();
-            boolean pressedNow = code >= 0 && InputConstants.isKeyDown(window, code);
+            boolean pressedNow = code >= 0 && InputConstants.isKeyDown(minecraft.getWindow(), code);
             boolean wasDown = down.contains(action);
 
             if (pressedNow && !wasDown) {
