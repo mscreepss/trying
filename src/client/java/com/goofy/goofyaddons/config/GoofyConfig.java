@@ -58,6 +58,8 @@ public class GoofyConfig {
         public int stop = -1;
         public int reloadConfig = -1;
         public int moveHud = -1;
+        /** HUD All-time <-> Session gecisi. Eski surumdeki V tusu korundu. */
+        public int hudMode = GLFW.GLFW_KEY_V;
     }
 
     // =====================================================================
