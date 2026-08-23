@@ -1,5 +1,6 @@
 package com.goofy.goofyaddons.ui;
 
+import com.goofy.goofyaddons.config.BookPresets;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.bookflipper.BazaarFlipper;
@@ -23,14 +24,23 @@ import java.util.List;
  * Koordinatları iki ayrı yerde elle hesaplamak (çiz bir yerde, tıkla başka yerde)
  * bu tür arayüzlerdeki bir numaralı hata kaynağıdır.
  *
- * Pencere boyutu ekrana göre kısılır: küçük GUI ölçeklerinde taşma olmaz, liste
- * ve satır yükseklikleri kalan alana göre daralır.
+ * SEKME YAPISI: Sol kenar çubuğunda dört ANA sayfa var:
+ *   Kontroller / Config / Istatistik / Session
+ * Config'in kendi içindeki ayrım (Aktif Kitaplar / Genel Ayarlar) sol menüye
+ * DEĞİL, içeriğin en üstündeki segment kontrolüne bağlı; aynı şekilde
+ * Istatistik'in kendi içinde de Gecmis / Canli Log / Kitap segmentleri var.
+ * Böylece sol menü sade kalıyor ve her alt sayfa tüm yüksekliği kullanabiliyor.
+ *
+ * Pencere boyutu ekrana göre kısılır: küçük GUI ölçeklerinde taşma olmaz.
  */
 public class GoofyScreen extends BaseScreen {
 
+    /** Sol kenar çubuğundaki ana sayfalar. */
     private enum Tab {
         CONTROLS("Kontroller"),
-        CONFIG("Ayarlar");
+        CONFIG("Config"),
+        STATS("Istatistik"),
+        SESSION("Session");
 
         final String title;
 
@@ -39,40 +49,72 @@ public class GoofyScreen extends BaseScreen {
         }
     }
 
-    /** Sekme seçimi ekranlar arasında hatırlansın. */
-    private static Tab activeTab = Tab.CONTROLS;
+    /** Config sayfasının KENDİ İÇİNDEKİ ayrım (segment kontrolü). */
+    private enum ConfigTab {
+        BOOKS("Aktif Kitaplar"),
+        GENERAL("Genel Ayarlar");
 
-    private static final int MAX_W = 452;
-    private static final int MAX_H = 340;
+        final String title;
+
+        ConfigTab(String title) {
+            this.title = title;
+        }
+    }
+
+    /** Sekme seçimleri ekranlar arasında hatırlansın. */
+    private static Tab activeTab = Tab.CONTROLS;
+    private static ConfigTab activeConfigTab = ConfigTab.BOOKS;
+
+    private static final int MAX_W = 468;
+    private static final int MAX_H = 348;
     private static final int HEADER_H = 36;
     private static final int SIDEBAR_W = 104;
     private static final int PAD = 16;
 
     // --- pencere ---
     private int winW, winH, left, top;
-    private int contentX, contentY, contentW, contentH;
+    private int contentX, contentY, contentW;
+    private int bodyBottom;
     private int closeX, closeY;
     private final int closeSize = 16;
     private int tabX, tabY, tabW, tabH, tabGap;
 
-    // --- kontroller sekmesi ---
+    // --- kontroller sayfası ---
     private int cardX, cardY, cardW, cardH;
     private int keysLabelY, keysLineY, keyRowsY, keyRowH, keyBoxX, keyBoxW, keyBoxH;
     private final List<Widgets.Button> macroButtons = new ArrayList<>();
     private KeyAction capturing = null;
 
-    // --- ayarlar sekmesi ---
-    private int listX, listY, listW, listH, bookRowH;
-    private int editBtnX, editBtnW, delBtnX, delBtnW, rowBtnH;
-    private int setLabelY, setLineY, setRowsY, setRowH, fieldX, fieldW;
-    private int bookScroll = 0;
+    // --- config: ortak ---
+    private int colX, colW;
+    private int segY, segH, segW;
+    private int bodyY;
 
+    // --- config > aktif kitaplar ---
+    private int listY, listH, bookRowH;
+    private int editBtnX, editBtnW, delBtnX, delBtnW, rowBtnH;
+    private int switchX, switchW, switchH;
+    private int bookScroll = 0;
+    private Widgets.Button addBookButton;
+    private Widgets.Button presetButton;
+
+    // --- config > genel ayarlar ---
+    private int setRowsY, setRowH, fieldX, fieldW;
     private final List<Widgets.TextBox> settingBoxes = new ArrayList<>();
     private Widgets.TextBox speedDelayBox, minDelayBox, maxDelayBox, firstPageBox, secondPageBox;
     private Widgets.Toggle speedToggle;
-    private Widgets.Button addBookButton;
 
+    // --- diğer sayfalar ---
+    private final StatsTab statsTab = new StatsTab();
+    private final SessionTab sessionTab = new SessionTab();
+
+    // --- katmanlar ---
     private BookForm modal = null;
+    private boolean presetsOpen = false;
+    private int presetScroll = 0;
+    private int presetX, presetY, presetW, presetH;
+    private final int presetRowH = 24;
+    private Widgets.Button presetReloadButton, presetCloseButton;
 
 
     public GoofyScreen() {
@@ -95,7 +137,7 @@ public class GoofyScreen extends BaseScreen {
         contentX = left + SIDEBAR_W;
         contentY = top + HEADER_H;
         contentW = winW - SIDEBAR_W;
-        contentH = winH - HEADER_H;
+        bodyBottom = top + winH - 12;
 
         closeX = left + winW - 10 - closeSize;
         closeY = top + 10;
@@ -106,23 +148,20 @@ public class GoofyScreen extends BaseScreen {
         tabH = 24;
         tabGap = 28;
 
-        int bottom = top + winH - 10;
-
         // ---------------- kontroller ----------------
         cardX = contentX + PAD;
         cardW = contentW - PAD * 2;
         cardY = contentY + 12;
 
-        // Kart yuksekligi de uyarlanabilir: tus satirlarina en az yer kalsin diye
-        // once onlarin ihtiyaci ayrilir, kalani karta verilir.
+        int controlsBottom = top + winH - 10;
         int keysMinBlock = KeyAction.values().length * 13 + 18 + 12;
-        cardH = clamp(bottom - cardY - keysMinBlock, 66, 72);
+        cardH = clamp(controlsBottom - cardY - keysMinBlock, 66, 72);
 
         keysLabelY = cardY + cardH + 12;
         keysLineY = keysLabelY + 11;
         keyRowsY = keysLabelY + 18;
 
-        int rowsAvail = bottom - keyRowsY;
+        int rowsAvail = controlsBottom - keyRowsY;
         keyRowH = clamp(rowsAvail / KeyAction.values().length, 13, 21);
         keyBoxW = 78;
         keyBoxH = Math.min(17, keyRowH - 2);
@@ -130,36 +169,54 @@ public class GoofyScreen extends BaseScreen {
 
         buildMacroButtons();
 
-        // ---------------- ayarlar ----------------
-        listX = contentX + PAD;
-        listW = contentW - PAD * 2;
-        listY = contentY + 34;
+        // ---------------- ortak içerik sütunu ----------------
+        colX = contentX + PAD;
+        colW = contentW - PAD * 2;
+
+        segY = contentY + 12;
+        segH = 20;
+        segW = colW / 2;
+        bodyY = segY + segH + 14;
+
+        // ---------------- config > aktif kitaplar ----------------
+        listY = bodyY + 22;
+        listH = Math.max(44, bodyBottom - listY);
         bookRowH = 22;
 
-        // Ayar satirlari ve liste yuksekligi kalan alana gore hesaplanir; kucuk GUI
-        // olceklerinde (ekran 480x270'e dustugunde) alt satirlar pencereden tasmasin.
-        // Ayar bloğunun yüksekliği: 12 (etiket) + 18 (çizgiden ilk satıra) +
-        // 5 * setRowH (satır araları) + 16 (son satırdaki kutu) + 4 (alt boşluk).
-        // listH bu bloktan ARTAN yer kadar olur, tersi değil - böylece alt satır
-        // hiçbir GUI ölçeğinde pencereden taşmaz.
-        int minListHeight = 44;
-        setRowH = clamp((bottom - listY - minListHeight - 50) / 5, 14, 19);
-        listH = clamp(bottom - listY - 50 - setRowH * 5, minListHeight, 160);
-
-        setLabelY = listY + listH + 12;
-        setLineY = setLabelY + 11;
-        setRowsY = setLabelY + 18;
-
-        fieldW = 46;
-        fieldX = listX + listW - fieldW;
+        switchW = 18;
+        switchH = 10;
+        switchX = colX + 7;
 
         rowBtnH = 13;
         editBtnW = 34;
         delBtnW = 28;
-        editBtnX = listX + listW - 8 - delBtnW - 6 - editBtnW;
-        delBtnX = listX + listW - 8 - delBtnW;
+        editBtnX = colX + colW - 8 - delBtnW - 6 - editBtnW;
+        delBtnX = colX + colW - 8 - delBtnW;
+
+        // ---------------- config > genel ayarlar ----------------
+        setRowsY = bodyY + 2;
+        setRowH = clamp((bodyBottom - setRowsY) / 6, 16, 30);
+        fieldW = 54;
+        fieldX = colX + colW - fieldW;
 
         buildConfigWidgets();
+
+        // ---------------- diğer sayfalar ----------------
+        statsTab.layout(colX, segY, colW, bodyBottom - segY);
+        sessionTab.layout(colX, segY, colW, bodyBottom - segY);
+
+        // ---------------- hazır setler katmanı ----------------
+        presetW = Math.min(320, this.width - 40);
+        presetH = Math.min(220, this.height - 40);
+        presetX = (this.width - presetW) / 2;
+        presetY = (this.height - presetH) / 2;
+        presetReloadButton = new Widgets.Button("Dosyayi Yenile", () -> {
+            BookPresets.load();
+            presetScroll = 0;
+        }).bounds(presetX + 14, presetY + presetH - 28, (presetW - 36) / 2, 20).accent(Theme.ACCENT);
+        presetCloseButton = new Widgets.Button("Kapat", () -> presetsOpen = false)
+                .bounds(presetX + 22 + (presetW - 36) / 2, presetY + presetH - 28, (presetW - 36) / 2, 20)
+                .accent(Theme.TEXT_DIM);
 
         if (modal != null) modal.layout(this.width, this.height);
     }
@@ -167,7 +224,7 @@ public class GoofyScreen extends BaseScreen {
     private void buildMacroButtons() {
         macroButtons.clear();
         int bw = (cardW - 16) / 3;
-        int by = cardY + cardH - 30; // kart yuksekligi degisse de alta hizali kalir
+        int by = cardY + cardH - 30;
         macroButtons.add(new Widgets.Button("Start", GoofyKeybinds::startMacro)
                 .bounds(cardX, by, bw, 22).accent(Theme.GREEN).filled(true));
         macroButtons.add(new Widgets.Button("Pause", GoofyKeybinds::togglePause)
@@ -181,8 +238,18 @@ public class GoofyScreen extends BaseScreen {
         GoofyConfig config = GoofyConfig.INSTANCE;
         if (config == null) return;
 
+        addBookButton = new Widgets.Button("+ Kitap Ekle", () -> openModal(null, -1))
+                .bounds(colX + colW - 82, bodyY, 82, 18)
+                .accent(Theme.ACCENT);
+
+        presetButton = new Widgets.Button("Hazir Setler", () -> {
+            BookPresets.load();
+            presetScroll = 0;
+            presetsOpen = true;
+        }).bounds(colX + colW - 82 - 6 - 76, bodyY, 76, 18).accent(Theme.GREEN);
+
         speedToggle = new Widgets.Toggle(config.speedMode);
-        speedToggle.bounds(fieldX + fieldW - speedToggle.w, setRowsY + 2);
+        speedToggle.bounds(fieldX + fieldW - speedToggle.w, rowControlY(0, speedToggle.h));
         speedToggle.onChange = () -> {
             config.speedMode = speedToggle.value;
             GoofyConfig.save();
@@ -209,26 +276,27 @@ public class GoofyScreen extends BaseScreen {
             GoofyConfig.save();
         };
 
-        speedDelayBox.bounds(fieldX, setRowsY + setRowH + 1, fieldW, 16);
-        minDelayBox.bounds(fieldX, setRowsY + setRowH * 2 + 1, fieldW, 16);
-        maxDelayBox.bounds(fieldX, setRowsY + setRowH * 3 + 1, fieldW, 16);
-        firstPageBox.bounds(fieldX - 44, setRowsY + setRowH * 4 + 1, fieldW + 44, 16);
-        secondPageBox.bounds(fieldX - 44, setRowsY + setRowH * 5 + 1, fieldW + 44, 16);
+        int boxH = 16;
+        speedDelayBox.bounds(fieldX, rowControlY(1, boxH), fieldW, boxH);
+        minDelayBox.bounds(fieldX, rowControlY(2, boxH), fieldW, boxH);
+        maxDelayBox.bounds(fieldX, rowControlY(3, boxH), fieldW, boxH);
+        firstPageBox.bounds(fieldX - 46, rowControlY(4, boxH), fieldW + 46, boxH);
+        secondPageBox.bounds(fieldX - 46, rowControlY(5, boxH), fieldW + 46, boxH);
 
         settingBoxes.add(speedDelayBox);
         settingBoxes.add(minDelayBox);
         settingBoxes.add(maxDelayBox);
         settingBoxes.add(firstPageBox);
         settingBoxes.add(secondPageBox);
+    }
 
-        addBookButton = new Widgets.Button("+ Kitap Ekle", () -> openModal(null, -1))
-                .bounds(listX + listW - 84, contentY + 12, 84, 18)
-                .accent(Theme.ACCENT);
+    private int rowControlY(int rowIndex, int controlHeight) {
+        return setRowsY + rowIndex * setRowH + (setRowH - controlHeight) / 2;
     }
 
     /**
-     * max <= min olursa BazaarFlipper.randomizer() çalışamaz. Kod tarafında da
-     * koruma var ama kullanıcıya doğrusunu göstermek için burada da düzeltiyoruz.
+     * max <= min olursa gecikme hesabı çalışamaz. Kod tarafında da koruma var ama
+     * kullanıcıya doğrusunu göstermek için burada da düzeltiyoruz.
      */
     private void fixDelayRange(GoofyConfig config) {
         if (config.maxActionDelay <= config.minActionDelay) {
@@ -243,7 +311,7 @@ public class GoofyScreen extends BaseScreen {
         Widgets.TextBox box = new Widgets.TextBox(String.valueOf(value)).numeric(true);
         box.maxLength = 5;
         box.onChange = () -> {
-            if (box.value.isEmpty()) return; // yazarken tamamen silinebilir, kaydetmeyelim
+            if (box.value.isEmpty()) return;
             apply.accept(box.intValue(0));
             GoofyConfig.save();
         };
@@ -279,6 +347,7 @@ public class GoofyScreen extends BaseScreen {
     public void tick() {
         super.tick();
         for (Widgets.TextBox box : settingBoxes) box.tick();
+        sessionTab.tick();
         if (modal != null) modal.tick();
     }
 
@@ -296,12 +365,14 @@ public class GoofyScreen extends BaseScreen {
         renderHeader(graphics, mouseX, mouseY);
         renderSidebar(graphics, mouseX, mouseY);
 
-        if (activeTab == Tab.CONTROLS) {
-            renderControls(graphics, mouseX, mouseY);
-        } else {
-            renderConfig(graphics, mouseX, mouseY);
+        switch (activeTab) {
+            case CONTROLS -> renderControls(graphics, mouseX, mouseY);
+            case CONFIG -> renderConfig(graphics, mouseX, mouseY);
+            case STATS -> statsTab.render(graphics, mouseX, mouseY);
+            case SESSION -> sessionTab.render(graphics, mouseX, mouseY);
         }
 
+        if (presetsOpen) renderPresets(graphics, mouseX, mouseY);
         if (modal != null) modal.render(graphics, mouseX, mouseY);
     }
 
@@ -405,35 +476,97 @@ public class GoofyScreen extends BaseScreen {
             return;
         }
 
+        renderConfigSegments(g, mouseX, mouseY, config);
+
+        if (activeConfigTab == ConfigTab.BOOKS) {
+            renderBooksTab(g, mouseX, mouseY, config);
+        } else {
+            renderGeneralTab(g, mouseX, mouseY);
+        }
+    }
+
+    private void renderConfigSegments(GuiGraphicsExtractor g, int mouseX, int mouseY, GoofyConfig config) {
+        Draw.panel(g, colX, segY, colW, segH, Theme.INSET, Theme.STROKE);
+
+        ConfigTab[] tabs = ConfigTab.values();
+        for (int i = 0; i < tabs.length; i++) {
+            int sx = segX(i);
+            int sw = segWidth(i);
+            boolean selected = tabs[i] == activeConfigTab;
+            boolean hover = Draw.inside(mouseX, mouseY, sx, segY, sw, segH);
+
+            if (selected) {
+                Draw.roundRect(g, sx + 2, segY + 2, sw - 4, segH - 4, Theme.SELECTED);
+                Draw.rect(g, sx + 6, segY + segH - 3, sw - 12, 1, Theme.ACCENT);
+            } else if (hover) {
+                Draw.roundRect(g, sx + 2, segY + 2, sw - 4, segH - 4, Theme.HOVER);
+            }
+
+            String label = tabs[i].title;
+            if (tabs[i] == ConfigTab.BOOKS) label = label + "  " + config.books.size();
+
+            int color = selected ? Theme.TEXT : (hover ? Theme.TEXT_DIM : Theme.TEXT_FAINT);
+            Draw.textCentered(g, Draw.clip(label, sw - 10), sx + sw / 2, segY + (segH - 8) / 2, color);
+        }
+    }
+
+    private int segX(int index) {
+        return colX + index * segW;
+    }
+
+    private int segWidth(int index) {
+        return index == ConfigTab.values().length - 1 ? colW - segW * index : segW;
+    }
+
+    // -- alt sekme: AKTIF KITAPLAR --
+
+    private void renderBooksTab(GuiGraphicsExtractor g, int mouseX, int mouseY, GoofyConfig config) {
         List<Book> books = config.books;
-        Draw.text(g, "AKTIF KITAPLAR", listX, contentY + 17, Theme.TEXT_FAINT);
-        Draw.text(g, books.size() + " hat", listX + Draw.textWidth("AKTIF KITAPLAR") + 8, contentY + 17, Theme.TEXT_FAINT);
+
+        int enabled = 0;
+        for (Book book : books) {
+            if (GoofyConfig.isBookEnabled(book)) enabled++;
+        }
+        Draw.text(g, enabled + " / " + books.size() + " hat aktif", colX, bodyY + 5, Theme.TEXT_FAINT);
+
+        presetButton.render(g, mouseX, mouseY);
         addBookButton.render(g, mouseX, mouseY);
 
-        Draw.panel(g, listX, listY, listW, listH, Theme.CARD, Theme.STROKE);
+        Draw.panel(g, colX, listY, colW, listH, Theme.CARD, Theme.STROKE);
 
         int visible = visibleBookRows();
         int maxScroll = Math.max(0, books.size() - visible);
         if (bookScroll > maxScroll) bookScroll = maxScroll;
 
         if (books.isEmpty()) {
-            Draw.textCentered(g, "Henuz kitap yok - '+ Kitap Ekle' ile basla",
-                    listX + listW / 2, listY + listH / 2 - 4, Theme.TEXT_FAINT);
+            Draw.textCentered(g, "Henuz kitap yok - '+ Kitap Ekle' ya da 'Hazir Setler'",
+                    colX + colW / 2, listY + listH / 2 - 4, Theme.TEXT_FAINT);
+            return;
         }
 
         for (int i = 0; i < visible && (i + bookScroll) < books.size(); i++) {
             Book book = books.get(i + bookScroll);
             int ry = listY + 1 + i * bookRowH;
+            boolean on = GoofyConfig.isBookEnabled(book);
 
-            if (Draw.inside(mouseX, mouseY, listX + 1, ry, listW - 2, bookRowH - 1)) {
-                Draw.rect(g, listX + 1, ry, listW - 2, bookRowH - 1, Theme.HOVER);
+            if (Draw.inside(mouseX, mouseY, colX + 1, ry, colW - 2, bookRowH - 1)) {
+                Draw.rect(g, colX + 1, ry, colW - 2, bookRowH - 1, Theme.HOVER);
             }
-            Draw.rect(g, listX + 1, ry + 4, 2, bookRowH - 9, Theme.ACCENT_SOFT);
 
+            // aktif/pasif anahtari
+            int sy = ry + (bookRowH - switchH) / 2;
+            boolean switchHover = Draw.inside(mouseX, mouseY, switchX, sy, switchW, switchH);
+            Draw.roundRect(g, switchX, sy, switchW, switchH, on ? Theme.GREEN_SOFT : Theme.INSET);
+            int knobX = on ? switchX + switchW - 7 : switchX + 2;
+            Draw.roundRect(g, knobX, sy + 2, 5, switchH - 4,
+                    on ? Theme.GREEN : (switchHover ? Theme.TEXT_DIM : Theme.TEXT_FAINT));
+
+            int textColor = on ? Theme.TEXT : Theme.TEXT_FAINT;
             String title = book.name() + "   " + roman(book.level()) + " \u2192 " + roman(book.sellLevel());
-            int textRoom = editBtnX - listX - 18;
-            Draw.text(g, Draw.clip(title, textRoom), listX + 10, ry + 3, Theme.TEXT);
-            Draw.text(g, Draw.clip(book.id(), textRoom), listX + 10, ry + 12, Theme.TEXT_FAINT);
+            int textLeft = switchX + switchW + 8;
+            int textRoom = editBtnX - textLeft - 8;
+            Draw.text(g, Draw.clip(title, textRoom), textLeft, ry + 3, textColor);
+            Draw.text(g, Draw.clip(book.id(), textRoom), textLeft, ry + 12, Theme.TEXT_FAINT);
 
             miniButton(g, "Edit", editBtnX, ry + 5, editBtnW, mouseX, mouseY, Theme.ACCENT);
             miniButton(g, "Sil", delBtnX, ry + 5, delBtnW, mouseX, mouseY, Theme.RED);
@@ -442,36 +575,109 @@ public class GoofyScreen extends BaseScreen {
         if (maxScroll > 0) {
             int barH = Math.max(12, listH * visible / Math.max(1, books.size()));
             int barY = listY + (listH - barH) * bookScroll / maxScroll;
-            Draw.rect(g, listX + listW - 3, barY, 2, barH, Theme.STROKE);
+            Draw.rect(g, colX + colW - 3, barY, 2, barH, Theme.STROKE);
         }
-
-        Draw.text(g, "GENEL AYARLAR", listX, setLabelY, Theme.TEXT_FAINT);
-        Draw.hLine(g, listX, setLineY, listW, Theme.STROKE);
-
-        settingRow(g, "Speed Mode", "envanter tiklamalarinda sabit gecikme", setRowsY);
-        settingRow(g, "Speed Delay", "ms", setRowsY + setRowH);
-        settingRow(g, "Min Delay", "ms", setRowsY + setRowH * 2);
-        settingRow(g, "Max Delay", "ms", setRowsY + setRowH * 3);
-        settingRow(g, "Depo Sayfa 1", "komut", setRowsY + setRowH * 4);
-        settingRow(g, "Depo Sayfa 2", "komut", setRowsY + setRowH * 5);
-
-        speedToggle.render(g, mouseX, mouseY);
-        for (Widgets.TextBox box : settingBoxes) box.render(g, mouseX, mouseY);
     }
 
     private int visibleBookRows() {
         return Math.max(1, (listH - 2) / bookRowH);
     }
 
-    private void settingRow(GuiGraphicsExtractor g, String title, String hint, int y) {
-        Draw.text(g, title, listX, y + 5, Theme.TEXT);
-        Draw.text(g, hint, listX + Draw.textWidth(title) + 8, y + 5, Theme.TEXT_FAINT);
+    // -- alt sekme: GENEL AYARLAR --
+
+    private void renderGeneralTab(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        settingRow(g, mouseX, mouseY, 0, "Speed Mode", "sabit gecikme kullan");
+        settingRow(g, mouseX, mouseY, 1, "Speed Delay", "ms");
+        settingRow(g, mouseX, mouseY, 2, "Min Delay", "ms");
+        settingRow(g, mouseX, mouseY, 3, "Max Delay", "ms");
+        settingRow(g, mouseX, mouseY, 4, "Depo Sayfa 1", "komut");
+        settingRow(g, mouseX, mouseY, 5, "Depo Sayfa 2", "komut");
+
+        speedToggle.render(g, mouseX, mouseY);
+        for (Widgets.TextBox box : settingBoxes) box.render(g, mouseX, mouseY);
+    }
+
+    private void settingRow(GuiGraphicsExtractor g, int mouseX, int mouseY, int rowIndex, String title, String hint) {
+        int y = setRowsY + rowIndex * setRowH;
+        int textY = y + (setRowH - 8) / 2;
+
+        if (Draw.inside(mouseX, mouseY, colX, y, colW, setRowH)) {
+            Draw.rect(g, colX - 4, y, colW + 8, setRowH, Theme.CARD);
+        }
+
+        Draw.text(g, title, colX, textY, Theme.TEXT);
+        Draw.text(g, hint, colX + Draw.textWidth(title) + 8, textY, Theme.TEXT_FAINT);
+
+        if (rowIndex < 5) Draw.hLine(g, colX, y + setRowH - 1, colW, Theme.STROKE);
     }
 
     private void miniButton(GuiGraphicsExtractor g, String label, int x, int y, int w, int mouseX, int mouseY, int accent) {
         boolean hover = Draw.inside(mouseX, mouseY, x, y, w, rowBtnH);
         Draw.roundRect(g, x, y, w, rowBtnH, hover ? Theme.HOVER : Theme.INSET);
         Draw.textCentered(g, label, x + w / 2, y + 3, hover ? accent : Theme.TEXT_DIM);
+    }
+
+    // ------------------------------------------------------------------ HAZIR SETLER
+
+    private void renderPresets(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        Draw.rect(g, 0, 0, this.width, this.height, 0xBB000000);
+        Draw.panel(g, presetX, presetY, presetW, presetH, Theme.WINDOW, Theme.STROKE);
+        Draw.rect(g, presetX + 1, presetY + 1, presetW - 2, 1, Theme.GREEN);
+
+        Draw.text(g, "Hazir Setler", presetX + 14, presetY + 14, Theme.TEXT);
+        Draw.textRight(g, BookPresets.status(), presetX + presetW - 14, presetY + 14, Theme.TEXT_FAINT);
+        Draw.text(g, "config/goofyaddons_presets.json - istedigin gibi duzenleyebilirsin",
+                presetX + 14, presetY + 26, Theme.TEXT_FAINT);
+
+        int listY = presetY + 40;
+        int listH = presetH - 40 - 34;
+        Draw.panel(g, presetX + 12, listY, presetW - 24, listH, Theme.CARD, Theme.STROKE);
+
+        List<BookPresets.Preset> presets = BookPresets.all();
+        if (presets.isEmpty()) {
+            Draw.textCentered(g, "presets.json bos ya da okunamadi",
+                    presetX + presetW / 2, listY + listH / 2 - 4, Theme.TEXT_FAINT);
+        } else {
+            int visible = Math.max(1, (listH - 4) / presetRowH);
+            presetScroll = clamp(presetScroll, 0, Math.max(0, presets.size() - visible));
+
+            for (int i = 0; i < visible && (i + presetScroll) < presets.size(); i++) {
+                BookPresets.Preset preset = presets.get(i + presetScroll);
+                int ry = listY + 2 + i * presetRowH;
+                boolean already = GoofyConfig.hasBook(preset.id, preset.level, -1);
+                boolean hover = Draw.inside(mouseX, mouseY, presetX + 13, ry, presetW - 26, presetRowH - 1);
+                if (hover && !already) Draw.rect(g, presetX + 13, ry, presetW - 26, presetRowH - 1, Theme.HOVER);
+
+                String title = preset.name + "   " + roman(preset.level) + " \u2192 " + roman(preset.sellLevel);
+                Draw.text(g, Draw.clip(title, presetW - 120), presetX + 22, ry + 3, already ? Theme.TEXT_FAINT : Theme.TEXT);
+                Draw.text(g, Draw.clip(preset.id, presetW - 120), presetX + 22, ry + 12, Theme.TEXT_FAINT);
+                Draw.textRight(g, already ? "ekli" : "+ ekle", presetX + presetW - 22, ry + 7,
+                        already ? Theme.TEXT_FAINT : Theme.GREEN);
+            }
+        }
+
+        presetReloadButton.render(g, mouseX, mouseY);
+        presetCloseButton.render(g, mouseX, mouseY);
+    }
+
+    private void presetsClicked(double mouseX, double mouseY) {
+        if (presetReloadButton.mouseClicked(mouseX, mouseY)) return;
+        if (presetCloseButton.mouseClicked(mouseX, mouseY)) return;
+
+        List<BookPresets.Preset> presets = BookPresets.all();
+        int listY = presetY + 40;
+        int listH = presetH - 40 - 34;
+        int visible = Math.max(1, (listH - 4) / presetRowH);
+
+        for (int i = 0; i < visible && (i + presetScroll) < presets.size(); i++) {
+            int ry = listY + 2 + i * presetRowH;
+            if (!Draw.inside(mouseX, mouseY, presetX + 13, ry, presetW - 26, presetRowH - 1)) continue;
+
+            BookPresets.Preset preset = presets.get(i + presetScroll);
+            if (GoofyConfig.hasBook(preset.id, preset.level, -1)) return;
+            GoofyConfig.addBook(preset.toBook());
+            return;
+        }
     }
 
     private static String roman(int level) {
@@ -501,6 +707,10 @@ public class GoofyScreen extends BaseScreen {
             modal.mouseClicked(mouseX, mouseY, 0);
             return;
         }
+        if (presetsOpen) {
+            presetsClicked(mouseX, mouseY);
+            return;
+        }
 
         if (Draw.inside(mouseX, mouseY, closeX, closeY, closeSize, closeSize)) {
             onClose();
@@ -517,10 +727,11 @@ public class GoofyScreen extends BaseScreen {
             }
         }
 
-        if (activeTab == Tab.CONTROLS) {
-            controlsClicked(mouseX, mouseY);
-        } else {
-            configClicked(mouseX, mouseY);
+        switch (activeTab) {
+            case CONTROLS -> controlsClicked(mouseX, mouseY);
+            case CONFIG -> configClicked(mouseX, mouseY);
+            case STATS -> statsTab.mouseClicked(mouseX, mouseY);
+            case SESSION -> sessionTab.mouseClicked(mouseX, mouseY);
         }
     }
 
@@ -543,18 +754,39 @@ public class GoofyScreen extends BaseScreen {
         GoofyConfig config = GoofyConfig.INSTANCE;
         if (config == null || addBookButton == null) return;
 
-        if (addBookButton.mouseClicked(mouseX, mouseY)) return;
-        if (speedToggle.mouseClicked(mouseX, mouseY)) return;
+        ConfigTab[] tabs = ConfigTab.values();
+        for (int i = 0; i < tabs.length; i++) {
+            if (Draw.inside(mouseX, mouseY, segX(i), segY, segWidth(i), segH)) {
+                activeConfigTab = tabs[i];
+                clearBoxFocus();
+                return;
+            }
+        }
 
-        for (Widgets.TextBox box : settingBoxes) box.mouseClicked(mouseX, mouseY);
+        if (activeConfigTab == ConfigTab.BOOKS) {
+            booksClicked(mouseX, mouseY, config);
+        } else {
+            generalClicked(mouseX, mouseY);
+        }
+    }
+
+    private void booksClicked(double mouseX, double mouseY, GoofyConfig config) {
+        if (presetButton.mouseClicked(mouseX, mouseY)) return;
+        if (addBookButton.mouseClicked(mouseX, mouseY)) return;
 
         int visible = visibleBookRows();
         for (int i = 0; i < visible && (i + bookScroll) < config.books.size(); i++) {
             int index = i + bookScroll;
             int ry = listY + 1 + i * bookRowH;
+            Book book = config.books.get(index);
 
+            int sy = ry + (bookRowH - switchH) / 2;
+            if (Draw.inside(mouseX, mouseY, switchX - 3, sy - 3, switchW + 6, switchH + 6)) {
+                GoofyConfig.setBookEnabled(book, !GoofyConfig.isBookEnabled(book));
+                return;
+            }
             if (Draw.inside(mouseX, mouseY, editBtnX, ry + 5, editBtnW, rowBtnH)) {
-                openModal(config.books.get(index), index);
+                openModal(book, index);
                 return;
             }
             if (Draw.inside(mouseX, mouseY, delBtnX, ry + 5, delBtnW, rowBtnH)) {
@@ -564,9 +796,23 @@ public class GoofyScreen extends BaseScreen {
         }
     }
 
+    private void generalClicked(double mouseX, double mouseY) {
+        if (speedToggle.mouseClicked(mouseX, mouseY)) return;
+        for (Widgets.TextBox box : settingBoxes) box.mouseClicked(mouseX, mouseY);
+    }
+
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-        if (modal == null && activeTab == Tab.CONFIG && GoofyConfig.INSTANCE != null) {
+        if (modal != null) return modal.mouseScrolled(scrollY);
+
+        if (presetsOpen) {
+            presetScroll = Math.max(0, presetScroll - (int) Math.signum(scrollY));
+            return true;
+        }
+
+        if (activeTab == Tab.STATS) return statsTab.mouseScrolled(scrollY);
+
+        if (activeTab == Tab.CONFIG && activeConfigTab == ConfigTab.BOOKS && GoofyConfig.INSTANCE != null) {
             int maxScroll = Math.max(0, GoofyConfig.INSTANCE.books.size() - visibleBookRows());
             bookScroll = clamp(bookScroll - (int) Math.signum(scrollY), 0, maxScroll);
             return true;
@@ -584,12 +830,19 @@ public class GoofyScreen extends BaseScreen {
     private boolean handleKey(int keyCode) {
         if (modal != null) return modal.keyPressed(keyCode);
 
+        if (presetsOpen) {
+            if (keyCode == 256) presetsOpen = false;
+            return true;
+        }
+
         // Tuş atama modu: bir sonraki tuş atanır, ESC atamayı kaldırır.
         if (capturing != null) {
             capturing.setKey(keyCode == 256 ? -1 : keyCode);
             capturing = null;
             return true;
         }
+
+        if (activeTab == Tab.SESSION && sessionTab.keyPressed(keyCode)) return true;
 
         for (Widgets.TextBox box : settingBoxes) {
             if (box.keyPressed(keyCode)) return true;
@@ -611,6 +864,8 @@ public class GoofyScreen extends BaseScreen {
         if (chr == 0) return super.charTyped(event);
 
         if (modal != null) return modal.charTyped(chr);
+        if (presetsOpen) return true;
+        if (activeTab == Tab.SESSION && sessionTab.charTyped(chr)) return true;
         for (Widgets.TextBox box : settingBoxes) {
             if (box.charTyped(chr)) return true;
         }
@@ -621,10 +876,11 @@ public class GoofyScreen extends BaseScreen {
         for (Widgets.TextBox box : settingBoxes) {
             if (box.focused) return true;
         }
-        return false;
+        return sessionTab.anyFocused();
     }
 
     private void clearBoxFocus() {
         for (Widgets.TextBox box : settingBoxes) box.focused = false;
+        sessionTab.clearFocus();
     }
 }
