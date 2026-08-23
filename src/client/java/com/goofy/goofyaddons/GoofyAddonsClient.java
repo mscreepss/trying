@@ -19,7 +19,7 @@ public class GoofyAddonsClient implements ClientModInitializer {
      * Dünyaya girince sohbette görünmüyorsa çalışan jar ESKİDİR - yeni kodun
      * hiçbiri devrede değil demektir.
      */
-    private static final String BUILD_TAG = "UI-4";
+    private static final String BUILD_TAG = "UI-5";
 
     private static boolean greeted = false;
 
