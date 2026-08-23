@@ -6,12 +6,10 @@ import com.goofy.goofyaddons.features.bookflipper.BazaarFlipper;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
 import com.goofy.goofyaddons.keybinds.GoofyKeybinds;
 import com.goofy.goofyaddons.keybinds.KeyAction;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 import java.util.ArrayList;
@@ -28,7 +26,7 @@ import java.util.List;
  * Pencere boyutu ekrana göre kısılır: küçük GUI ölçeklerinde taşma olmaz, liste
  * ve satır yükseklikleri kalan alana göre daralır.
  */
-public class GoofyScreen extends Screen implements GoofyGui {
+public class GoofyScreen extends BaseScreen {
 
     private enum Tab {
         CONTROLS("Kontroller"),
@@ -45,7 +43,7 @@ public class GoofyScreen extends Screen implements GoofyGui {
     private static Tab activeTab = Tab.CONTROLS;
 
     private static final int MAX_W = 452;
-    private static final int MAX_H = 310;
+    private static final int MAX_H = 340;
     private static final int HEADER_H = 36;
     private static final int SIDEBAR_W = 104;
     private static final int PAD = 16;
@@ -76,11 +74,6 @@ public class GoofyScreen extends Screen implements GoofyGui {
 
     private BookForm modal = null;
 
-    // Yeni girdi API'sinde mouseClicked artik koordinat almiyor (MouseButtonEvent
-    // aliyor ve alan adlari sürüme göre degisebiliyor). Konumu her karede render'dan
-    // yakalayip burada tutuyoruz - tiklama aninda en guncel deger zaten budur.
-    private int lastMouseX = 0;
-    private int lastMouseY = 0;
 
     public GoofyScreen() {
         super(Component.literal("GoofyAddons"));
@@ -119,14 +112,18 @@ public class GoofyScreen extends Screen implements GoofyGui {
         cardX = contentX + PAD;
         cardW = contentW - PAD * 2;
         cardY = contentY + 12;
-        cardH = 72;
+
+        // Kart yuksekligi de uyarlanabilir: tus satirlarina en az yer kalsin diye
+        // once onlarin ihtiyaci ayrilir, kalani karta verilir.
+        int keysMinBlock = KeyAction.values().length * 13 + 18 + 12;
+        cardH = clamp(bottom - cardY - keysMinBlock, 66, 72);
 
         keysLabelY = cardY + cardH + 12;
         keysLineY = keysLabelY + 11;
         keyRowsY = keysLabelY + 18;
 
         int rowsAvail = bottom - keyRowsY;
-        keyRowH = clamp(rowsAvail / KeyAction.values().length, 15, 21);
+        keyRowH = clamp(rowsAvail / KeyAction.values().length, 13, 21);
         keyBoxW = 78;
         keyBoxH = Math.min(17, keyRowH - 2);
         keyBoxX = cardX + cardW - keyBoxW;
@@ -139,9 +136,15 @@ public class GoofyScreen extends Screen implements GoofyGui {
         listY = contentY + 34;
         bookRowH = 22;
 
-        setRowH = 19;
-        int settingsBlock = 12 + 6 + setRowH * 6; // etiket + boşluk + 6 satır
-        listH = clamp(bottom - listY - settingsBlock - 10, 44, 160);
+        // Ayar satirlari ve liste yuksekligi kalan alana gore hesaplanir; kucuk GUI
+        // olceklerinde (ekran 480x270'e dustugunde) alt satirlar pencereden tasmasin.
+        // Ayar bloğunun yüksekliği: 12 (etiket) + 18 (çizgiden ilk satıra) +
+        // 5 * setRowH (satır araları) + 16 (son satırdaki kutu) + 4 (alt boşluk).
+        // listH bu bloktan ARTAN yer kadar olur, tersi değil - böylece alt satır
+        // hiçbir GUI ölçeğinde pencereden taşmaz.
+        int minListHeight = 44;
+        setRowH = clamp((bottom - listY - minListHeight - 50) / 5, 14, 19);
+        listH = clamp(bottom - listY - 50 - setRowH * 5, minListHeight, 160);
 
         setLabelY = listY + listH + 12;
         setLineY = setLabelY + 11;
@@ -164,7 +167,7 @@ public class GoofyScreen extends Screen implements GoofyGui {
     private void buildMacroButtons() {
         macroButtons.clear();
         int bw = (cardW - 16) / 3;
-        int by = cardY + 42;
+        int by = cardY + cardH - 30; // kart yuksekligi degisse de alta hizali kalir
         macroButtons.add(new Widgets.Button("Start", GoofyKeybinds::startMacro)
                 .bounds(cardX, by, bw, 22).accent(Theme.GREEN).filled(true));
         macroButtons.add(new Widgets.Button("Pause", GoofyKeybinds::togglePause)
@@ -274,6 +277,7 @@ public class GoofyScreen extends Screen implements GoofyGui {
 
     @Override
     public void tick() {
+        super.tick();
         for (Widgets.TextBox box : settingBoxes) box.tick();
         if (modal != null) modal.tick();
     }
@@ -282,21 +286,8 @@ public class GoofyScreen extends Screen implements GoofyGui {
     // Çizim
     // =====================================================================
 
-    // Bu surumde Screen#render'in son parametresi float mu DeltaTracker mi degisebiliyor.
-    // Iki asiri yukleme de tanimli: hangisi ust siniftaki imzayla eslesirse o cagrilir,
-    // digeri sadece durur. @Override bilerek yok - yanlis olani derlemeyi kilitlemesin.
-    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-        draw(graphics, mouseX, mouseY);
-    }
-
-    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, DeltaTracker deltaTracker) {
-        draw(graphics, mouseX, mouseY);
-    }
-
-    private void draw(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
-        lastMouseX = mouseX;
-        lastMouseY = mouseY;
-
+    @Override
+    protected void drawContent(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
         Draw.rect(graphics, 0, 0, this.width, this.height, Theme.SCRIM);
 
         Draw.panel(graphics, left, top, winW, winH, Theme.WINDOW, Theme.STROKE);
