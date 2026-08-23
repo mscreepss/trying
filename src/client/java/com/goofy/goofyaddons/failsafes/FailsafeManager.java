@@ -10,8 +10,16 @@ public class FailsafeManager {
 
     public static FailsafeManager INSTANCE = new FailsafeManager();
 
+    /** Arayüz durum satırını okuyabilsin diye ayrıca tutuluyor. */
+    private final SessionPlanner sessionPlanner = new SessionPlanner();
+
     private FailsafeManager() {
         failsafes.add(new ScheduledReboot());
+        failsafes.add(sessionPlanner);
+    }
+
+    public SessionPlanner getSessionPlanner() {
+        return sessionPlanner;
     }
 
     public void onTick() {
