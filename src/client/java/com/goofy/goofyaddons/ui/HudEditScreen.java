@@ -3,25 +3,20 @@ package com.goofy.goofyaddons.ui;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.render.hud.EconomyHud;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.input.MouseButtonEvent;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /**
  * HUD taşıma modu: HUD'un bir önizlemesi çizilir ve fare ile sürüklenebilir.
  * ESC / ENTER kaydeder ve kapatır. Ekran dışına taşmaması için sınırlandırılır.
  */
-public class HudEditScreen extends Screen implements GoofyGui {
+public class HudEditScreen extends BaseScreen {
 
     private boolean dragging = false;
     private int grabOffsetX = 0;
     private int grabOffsetY = 0;
 
-    // Yeni girdi API'sinde tiklama koordinat tasimiyor; konumu render'dan yakaliyoruz.
-    private int lastMouseX = 0;
-    private int lastMouseY = 0;
 
     public HudEditScreen() {
         super(Component.literal("GoofyAddons HUD"));
@@ -44,20 +39,8 @@ public class HudEditScreen extends Screen implements GoofyGui {
         return false;
     }
 
-    // Screen#render son parametresi float mu DeltaTracker mi degisebiliyor:
-    // iki asiri yukleme de var, hangisi eslesirse o cagrilir. @Override bilerek yok.
-    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-        draw(graphics, mouseX, mouseY);
-    }
-
-    public void render(GuiGraphicsExtractor graphics, int mouseX, int mouseY, DeltaTracker deltaTracker) {
-        draw(graphics, mouseX, mouseY);
-    }
-
-    private void draw(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
-        lastMouseX = mouseX;
-        lastMouseY = mouseY;
-
+    @Override
+    protected void drawContent(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
         Draw.rect(graphics, 0, 0, this.width, this.height, Theme.SCRIM);
 
         // ekran ortasına yardım metni
@@ -71,11 +54,11 @@ public class HudEditScreen extends Screen implements GoofyGui {
         if (config == null) return;
 
         if (dragging) {
-            config.hudX = clamp(mouseX - grabOffsetX, 0, this.width - EconomyHud.WIDTH);
+            config.hudX = clamp(mouseX - grabOffsetX, 0, this.width - EconomyHud.width());
             config.hudY = clamp(mouseY - grabOffsetY, 0, this.height - EconomyHud.HEIGHT);
         }
 
-        boolean hover = Draw.inside(mouseX, mouseY, config.hudX, config.hudY, EconomyHud.WIDTH, EconomyHud.HEIGHT);
+        boolean hover = Draw.inside(mouseX, mouseY, config.hudX, config.hudY, EconomyHud.width(), EconomyHud.HEIGHT);
         EconomyHud.render(graphics, config.hudX, config.hudY, hover || dragging);
 
         // konum bilgisi
@@ -87,7 +70,7 @@ public class HudEditScreen extends Screen implements GoofyGui {
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         GoofyConfig config = GoofyConfig.INSTANCE;
         if (config != null
-                && Draw.inside(lastMouseX, lastMouseY, config.hudX, config.hudY, EconomyHud.WIDTH, EconomyHud.HEIGHT)) {
+                && Draw.inside(lastMouseX, lastMouseY, config.hudX, config.hudY, EconomyHud.width(), EconomyHud.HEIGHT)) {
             dragging = true;
             grabOffsetX = lastMouseX - config.hudX;
             grabOffsetY = lastMouseY - config.hudY;
