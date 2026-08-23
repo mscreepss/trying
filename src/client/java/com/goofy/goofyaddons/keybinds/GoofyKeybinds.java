@@ -2,6 +2,7 @@ package com.goofy.goofyaddons.keybinds;
 
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
+import com.goofy.goofyaddons.features.economy.EconomyTracker;
 import com.goofy.goofyaddons.ui.GoofyScreen;
 import com.goofy.goofyaddons.ui.HudEditScreen;
 import com.goofy.goofyaddons.utils.ChatUtils;
@@ -62,6 +63,7 @@ public final class GoofyKeybinds {
                 GoofyConfig.load();
                 ChatUtils.clientMessage("Config yeniden yuklendi.");
             }
+            case HUD_MODE -> toggleHudMode();
         }
     }
 
@@ -81,6 +83,11 @@ public final class GoofyKeybinds {
             return;
         }
         FeatureManager.INSTANCE.stop();
+    }
+
+    public static void toggleHudMode() {
+        EconomyTracker.toggleMode();
+        ChatUtils.clientMessage("Economy HUD: " + EconomyTracker.getModeLabel() + " modu");
     }
 
     public static void togglePause() {
