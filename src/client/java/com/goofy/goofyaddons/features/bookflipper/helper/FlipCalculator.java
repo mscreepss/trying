@@ -41,6 +41,9 @@ public class FlipCalculator {
 
                     for (Book book : GoofyConfig.INSTANCE.books) {
 
+                        // Arayuzden kapatilmis hatlar hic hesaba katilmaz.
+                        if (!GoofyConfig.isBookEnabled(book)) continue;
+
                         loadProduct(products, book.getLevel(book.level()));
                         loadProduct(products, book.getLevel(book.sellLevel()));
 
@@ -70,6 +73,8 @@ public class FlipCalculator {
         flipItemsList.clear();
 
         for (Book book : GoofyConfig.INSTANCE.books) {
+
+            if (!GoofyConfig.isBookEnabled(book)) continue;
 
             BazaarData buyData = bazaar.get(book.getLevel(book.level()));
             BazaarData sellData = bazaar.get(book.getLevel(book.sellLevel()));
