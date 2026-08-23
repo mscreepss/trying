@@ -3,10 +3,12 @@ package com.goofy.goofyaddons.features.bookflipper;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.event.ChatHook;
 import com.goofy.goofyaddons.features.Feature;
+import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.bookflipper.helper.BazaarMonitor;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipCalculator;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipItem;
+import com.goofy.goofyaddons.features.bookflipper.helper.TradeHistory;
 import com.goofy.goofyaddons.ui.GoofyGui;
 import com.goofy.goofyaddons.utils.*;
 import net.minecraft.client.Minecraft;
@@ -61,7 +63,9 @@ public class BazaarFlipper implements Feature {
         ANVIL,
         COMBINE,
         SELL,
-        REPLACE_SELL
+        REPLACE_SELL,
+        /** Takilma tespit edildiginde girilen toparlanma durumu. */
+        RECOVERY
     }
 
     private enum BookState {
@@ -115,6 +119,31 @@ public class BazaarFlipper implements Feature {
     private final Clock combineConfirmClock = new Clock();
     private boolean combineConfirmPending = false;
 
+    // --- takilma bekcisi (state timeout + recovery) ---
+    /** Bu state'e ne zaman girildi. Her tiklamada da tazelenir - is yapiliyorsa saat sifirlanir. */
+    private long stateEnteredMs = 0;
+    /** Herhangi bir gorevin durumu en son ne zaman degisti (arayuz/teshis icin). */
+    private long lastProgressMs = 0;
+    private State recoverFromState = null;
+    private int recoveryCount = 0;
+    /** Ust ust bu kadar toparlanma denemesinden sonra makro guvenlik icin durur. */
+    private static final int MAX_RECOVERY_ATTEMPTS = 3;
+    /**
+     * IDLE'da HIC gorev yokken bu kadar beklenirse fiyatlar yeniden cekilir.
+     *
+     * DIKKAT: Bu sayac SADECE task haritasi bosken isler. Acik buy order'larin
+     * dolmasini beklemek saatler surebilir ve bu TAMAMEN NORMALDIR - o durumda
+     * gorevler var demektir, bekci hic devreye girmez. Yoksa gece boyu bekleyen
+     * saglikli bir makroyu "takildi" sanip durdururduk.
+     */
+    private static final long IDLE_EMPTY_TIMEOUT_MS = 10 * 60 * 1000L;
+
+    // --- canli log icin sayaclar ---
+    private int lastOrderAmount = 0;
+    private int outbidClaimedAmount = 0;
+    private int storedThisVisit = 0;
+    private boolean sellOrderCancelled = false;
+
 
     private final Map<Book, Task> task = new LinkedHashMap<>();
 
@@ -148,6 +177,12 @@ public class BazaarFlipper implements Feature {
         firstStartUp = true;
         enabled = true;
         state = State.START;
+        stateEnteredMs = System.currentTimeMillis();
+        lastProgressMs = stateEnteredMs;
+        recoverFromState = null;
+        recoveryCount = 0;
+        Humanizer.reset();
+        ActionLog.add(ActionLog.Tag.SYSTEM, "makro baslatildi");
     }
 
     public BazaarFlipper() {
@@ -182,6 +217,13 @@ public class BazaarFlipper implements Feature {
         didReceiveItems = false;
         useSecondPage = false;
         secondPageCheck = false;
+        stateEnteredMs = 0;
+        lastProgressMs = 0;
+        recoverFromState = null;
+        recoveryCount = 0;
+        TradeHistory.clearActive();
+        Humanizer.reset();
+        ActionLog.add(ActionLog.Tag.SYSTEM, "makro durduruldu");
 
     }
 
@@ -209,6 +251,14 @@ public class BazaarFlipper implements Feature {
 
         bazaarMonitor.onTick();
         lastStateCheck();
+        watchdog();
+        // watchdog makroyu tamamen durdurmus olabilir; durdurulmus makro tiklamaya devam etmesin.
+        if (!enabled) return;
+
+        // MIKRO MOLA: birkac saniyeligine hicbir sey yapilmaz. State, gorevler ve
+        // sayaclar oldugu gibi kalir; sadece bu tick'lerde tiklama yok. En uzun mola
+        // 8 sn, en kisa state zaman asimi 25 sn - bekci yanlislikla tetiklenmez.
+        if (Humanizer.isResting()) return;
 
         // FIRSATÇI DEPO TARAMASI: depo hangi sebeple açılırsa açılsın (STORE, ANVIL,
         // STARTUP_CHECK) o açılışta BİR KEZ taranır ve hiçbir görevin sayacında
@@ -324,6 +374,7 @@ public class BazaarFlipper implements Feature {
                     didReceiveItems = false;
                     claimedItems = false;
                     counterBazaar = 0;
+                    outbidClaimedAmount = 0;
                     return;
                 }
 
@@ -353,6 +404,7 @@ public class BazaarFlipper implements Feature {
                     isInventoryFull = false;
                     useSecondPage = false;
                     storePageFlipped = false;
+                    storedThisVisit = 0;
                     return;
                 }
 
@@ -377,6 +429,8 @@ public class BazaarFlipper implements Feature {
                             continue;
                         }
 
+                        ActionLog.add(ActionLog.Tag.ANVIL, book.name() + ": anvile "
+                                + Math.max(0, task.get(book).inInventory) + " adet ile girildi");
                         editStateBook(book, BookState.COMBINE);
                     }
                     if (shouldCheck) {
@@ -412,19 +466,19 @@ public class BazaarFlipper implements Feature {
                     List<Integer> slots = inventoryScanner.findContainer(activeBook.getRomanLevel(activeBook.level()));
                     debug("Bazaar open, clicking slot " + slots + " for " + activeBook.getRomanLevel(activeBook.level()));
                     if (slots.isEmpty()) return;
-                    InventoryUtils.clickSlot(slots.getFirst(), false);
+                    click(slots.getFirst(), false);
                 }
 
                 if (containerCheck(activeBook.name())) clock.start(randomizer());
                 if (containerCheck(activeBook.name()) && clock.shouldFire()) {
                     debug("book container open, clicking slot 15");
-                    InventoryUtils.clickSlot(15, false);
+                    click(15, false);
                 }
 
                 if (containerCheck("How many do you want")) clock.start(randomizer());
                 if (containerCheck("How many do you want") && clock.shouldFire()) {
                     debug("qty prompt open, clicking slot 16");
-                    InventoryUtils.clickSlot(16, false);
+                    click(16, false);
                 }
                 if (minecraft.screen instanceof SignEditScreen) clock.start(randomizer());
                 if (minecraft.screen instanceof SignEditScreen && clock.shouldFire()) {
@@ -436,13 +490,15 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("How much do you want to pay") && clock.shouldFire()) {
                     debug("clicking slot 12 to confirm price, book=" + activeBook);
                     bazaarMonitor.add(activeBook, inventoryScanner.getUnitPrice(12), false);
-                    InventoryUtils.clickSlot(12, false);
+                    click(12, false);
                 }
 
                 if (containerCheck("Confirm")) clock.start(randomizer());
                 if (containerCheck("Confirm") && clock.shouldFire()) {
                     debug("confirming buy order for " + activeBook);
-                    InventoryUtils.clickSlot(13, false);
+                    click(13, false);
+                    ActionLog.add(ActionLog.Tag.BUY, activeBook.getRomanLevel(activeBook.level())
+                            + " x" + lastOrderAmount + " buy order acildi");
                     if (shouldStore(activeBook)) {
                         editStateBook(activeBook, BookState.STORE);
                         state = State.IDLE;
@@ -465,7 +521,7 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("Wise")) clock.start(randomizer());
                 if (containerCheck("Wise") && clock.shouldFire()) {
                     debug("Wise open, clicking slot 50");
-                    InventoryUtils.clickSlot(50, false);
+                    click(50, false);
                 }
 
                 if (containerCheck("Bazaar")) clock.start(randomizer());
@@ -504,6 +560,12 @@ public class BazaarFlipper implements Feature {
                         // ortasında OUTBID'e atıyordu - havuz bölünüp öksüz doğuyordu.
                         bazaarMonitor.finish(bookToHandle);
 
+                        int remainingOrder = Math.max(0, task.get(bookToHandle).getAmountToOrder());
+                        ActionLog.add(ActionLog.Tag.OUTBID, bookToHandle.getRomanLevel(bookToHandle.level())
+                                + ": " + outbidClaimedAmount + " adet claim edildi, "
+                                + (remainingOrder == 0 ? "hat tamamlandi" : remainingOrder + " adet yeniden aciliyor"));
+                        outbidClaimedAmount = 0;
+
                         editStateBook(bookToHandle, task.get(bookToHandle).isCompleted() ? BookState.ANVIL : BookState.SELECTED);
                         didRemoveOrder = false;
                         counterBazaar = 0;
@@ -524,7 +586,7 @@ public class BazaarFlipper implements Feature {
                             minecraft.player.closeContainer();
                             return;
                         }
-                        InventoryUtils.clickSlot(slots.getFirst(), false);
+                        click(slots.getFirst(), false);
                         if (amount == 0) {
                             debug("amount=0, returning early");
                             return;
@@ -534,6 +596,7 @@ public class BazaarFlipper implements Feature {
 
 
                         task.get(bookToHandle).addInInventory(amount);
+                        outbidClaimedAmount += amount;
                     }
                 }
 
@@ -543,7 +606,7 @@ public class BazaarFlipper implements Feature {
                     List<Integer> slot = inventoryScanner.findContainer("Cancel Order");
                     if (slot.isEmpty()) return;
                     debug("Order screen open, clicking slot " + slot.getFirst());
-                    InventoryUtils.clickSlot(slot.getFirst(), false);
+                    click(slot.getFirst(), false);
 
                 }
             }
@@ -605,15 +668,23 @@ public class BazaarFlipper implements Feature {
                             return;
                         }
 
-                        InventoryUtils.clickSlot(slots.getFirst(), true);
+                        click(slots.getFirst(), true);
                         debug("storing " + bookToHandle.name() + " at slot " + slots.getFirst() + " (kalan kendi payi: " + (storeTask.inInventory - 1) + ")");
                         storeTask.addInInventory(-1);
                         storeTask.addInEnderChest(1);
                         storePageFlipped = false;
+                        storedThisVisit++;
                         return;
                     }
 
                     // Kendi payımız bitti (ya da envanterde bu kitaptan kalmadı).
+                    if (storedThisVisit > 0) {
+                        ActionLog.add(ActionLog.Tag.STORE, bookToHandle.getRomanLevel(bookToHandle.level())
+                                + ": " + storedThisVisit + " adet depoya koyuldu, "
+                                + Math.max(0, storeTask.getAmountToOrder()) + " adet hala buy order'da");
+                        storedThisVisit = 0;
+                    }
+
                     if (storeTask.isEarlyAction()) {
                         editStateBook(bookToHandle, BookState.OUTBID);
                         storeTask.setEarlyAction(false);
@@ -679,7 +750,7 @@ public class BazaarFlipper implements Feature {
                     // (öksüz parça) kalıyordu.
                     if (!slots.isEmpty() && currentTask.inEnderChest > 0) {
                         debug("pulling slot " + slots.getFirst() + " from ender chest (kalan kendi payi: " + (currentTask.inEnderChest - 1) + ")");
-                        InventoryUtils.clickSlot(slots.getFirst(), true);
+                        click(slots.getFirst(), true);
                         currentTask.addInInventory(1);
                         currentTask.addInEnderChest(-1);
                         // İlerleme kaydettik: bir sonraki takılmada iki sayfa da yeniden
@@ -696,7 +767,7 @@ public class BazaarFlipper implements Feature {
                     List<Integer> leftovers = leftoverContainerSlots(bookToHandle);
                     if (!leftovers.isEmpty() && inventoryScanner.getEmptyInventorySlots() > 0) {
                         debug("pulling leftover intermediate book from slot " + leftovers.getFirst());
-                        InventoryUtils.clickSlot(leftovers.getFirst(), true);
+                        click(leftovers.getFirst(), true);
                         currentTask.setOtherPageChecked(false);
                         currentTask.setAnvilRecheckAttempted(false);
                         return;
@@ -723,6 +794,8 @@ public class BazaarFlipper implements Feature {
                         currentTask.clearEnderChest();
                     }
 
+                    ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name() + ": anvile "
+                            + Math.max(0, currentTask.inInventory) + " adet ile girildi");
                     editStateBook(bookToHandle, BookState.COMBINE);
                 }
             }
@@ -778,6 +851,9 @@ public class BazaarFlipper implements Feature {
                             // birim olarak sayılıp sipariş miktarından düşülecek.
                             ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik kaldi, gorev birakiliyor. Kalan ara seviye kitaplar makro yeniden baslatildiginda siparis miktarindan dusulecek.");
                             debug("dead end for " + bookToHandle.name() + " - physical shortage, dropping task");
+                            ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
+                                    + ": havuz eksik kaldi, gorev birakildi");
+                            TradeHistory.abandon(bookToHandle);
                             task.remove(bookToHandle);
                         }
                         return;
@@ -796,7 +872,7 @@ public class BazaarFlipper implements Feature {
                             return;
                         }
                         counter++;
-                        InventoryUtils.clickSlot(book.getFirst(), true);
+                        click(book.getFirst(), true);
                         return;
                     } else {
                         List<Integer> bookInContainer = inventoryScanner.findLoreContainer(bookToHandle.getRomanLevel(level));
@@ -813,7 +889,7 @@ public class BazaarFlipper implements Feature {
                 // Onay bekleniyorsa ve saatin süresi dolduysa tıklama işlemini yap
                 if (counter == 2 && combineConfirmPending && combineConfirmClock.shouldFire()) {
                     debug("counter==2, clicking anvil output slot 22 with normal click");
-                    InventoryUtils.clickSlot(22, false);
+                    click(22, false);
 
                     if (clickedOnce) {
                         clickedOnce = false;
@@ -843,7 +919,7 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("tomato")) clock.start(randomizer());
                 if (containerCheck("tomato") && clock.shouldFire()) {
                     debug("tomato bazaar open, clicking slot 50");
-                    InventoryUtils.clickSlot(50, false);
+                    click(50, false);
                 }
 
                 if (containerCheck("Bazaar")) clock.start(randomizer());
@@ -858,7 +934,7 @@ public class BazaarFlipper implements Feature {
 
                     if (!slots.isEmpty()) {
                         debug("clicking sell slot " + slots.getFirst());
-                        InventoryUtils.clickSlot(slots.getFirst(), false);
+                        click(slots.getFirst(), false);
                     }
                     if (slots.isEmpty()) {
                         debug("no slots found, clicking on: " + bookList.getFirst().name());
@@ -872,7 +948,7 @@ public class BazaarFlipper implements Feature {
                             bookList.removeFirst();
                             return;
                         }
-                        InventoryUtils.clickSlot(slot.getFirst(), false);
+                        click(slot.getFirst(), false);
                     }
                 }
 
@@ -881,31 +957,48 @@ public class BazaarFlipper implements Feature {
                     List<Integer> slot = inventoryScanner.findContainer("Cancel Order");
                     if (slot.isEmpty()) return;
                     debug("Order screen open, clicking slot " + slot.getFirst());
-                    InventoryUtils.clickSlot(slot.getFirst(), false);
+                    click(slot.getFirst(), false);
+                    sellOrderCancelled = true;
                 }
 
                 if (!bookList.isEmpty() && containerCheck(bookList.getFirst().name())) clock.start(randomizer());
                 if (!bookList.isEmpty() && containerCheck(bookList.getFirst().name()) && clock.shouldFire()) {
                     debug("book screen open, clicking slot 16");
-                    InventoryUtils.clickSlot(16, false);
+                    click(16, false);
                 }
 
                 if (containerCheck("At what price are you selling")) clock.start(randomizer());
                 if (containerCheck("At what price are you selling") && clock.shouldFire()) {
                     debug("price prompt, clicking slot 12");
-                    InventoryUtils.clickSlot(12, false);
+                    click(12, false);
                 }
 
                 if (containerCheck("Confirm")) clock.start(randomizer());
                 if (containerCheck("Confirm") && clock.shouldFire()) {
                     Book soldBook = bookList.getFirst();
                     debug("confirm prompt, clicking slot 13 and removing " + soldBook + " from sell list");
-                    InventoryUtils.clickSlot(13, false);
+                    click(13, false);
+
+                    int listedAmount = inventoryScanner.locate(soldBook.getRomanLevel(soldBook.sellLevel())).size();
+                    ActionLog.add(ActionLog.Tag.SELL, soldBook.getRomanLevel(soldBook.sellLevel())
+                            + ": " + (sellOrderCancelled ? "acik sell order iptal edildi, " : "")
+                            + "toplam " + Math.max(1, listedAmount) + " adet satisa cikarildi");
+                    sellOrderCancelled = false;
+
+                    // SURE OLCUMU BURADA BITER: ilk buy order -> sell order acilisi.
+                    // Ayni isimden birden fazla hat ayni satis emrinde birlesebilir,
+                    // hepsinin kaydi birlikte kapanir.
+                    for (Book sameName : booksInState(BookState.SELL)) {
+                        if (!sameName.name().equals(soldBook.name())) continue;
+                        TradeHistory.sellOrderPlaced(sameName);
+                    }
 
                     Task soldTask = task.get(soldBook);
                     if (soldTask != null && soldTask.getAmountToOrder() < 0) {
                         soldTask.addInInventory(-soldBook.getQtyAmount(soldBook.level()));
                         editStateBook(soldBook, BookState.SELECTED);
+                        // Gorev yasamaya devam ediyor: yeni bir olcum turu baslasin.
+                        TradeHistory.begin(soldBook);
                         return;
                     }
 
@@ -929,7 +1022,7 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("tomato")) clock.start(randomizer());
                 if (containerCheck("tomato") && clock.shouldFire()) {
                     debug("tomato bazaar open, clicking slot 50");
-                    InventoryUtils.clickSlot(50, false);
+                    click(50, false);
                 }
 
                 if (containerCheck("Bazaar")) clock.start(randomizer());
@@ -944,7 +1037,7 @@ public class BazaarFlipper implements Feature {
                         }
 
                         if (!slot.isEmpty()) {
-                            InventoryUtils.clickSlot(slot.getFirst(), false);
+                            click(slot.getFirst(), false);
                             return;
                         }
 
@@ -956,7 +1049,7 @@ public class BazaarFlipper implements Feature {
 
                     sellOrderName.add(inventoryScanner.getName(slots.getFirst()).replace("SELL ", ""));
 
-                    InventoryUtils.clickSlot(slots.getFirst(), false);
+                    click(slots.getFirst(), false);
 
                 }
 
@@ -965,31 +1058,65 @@ public class BazaarFlipper implements Feature {
                     List<Integer> slot = inventoryScanner.findContainer("Cancel Order");
                     if (slot.isEmpty()) return;
                     debug("Order screen open, clicking slot " + slot.getFirst());
-                    InventoryUtils.clickSlot(slot.getFirst(), false);
+                    click(slot.getFirst(), false);
                 }
 
                 if (!sellOrderName.isEmpty() && containerCheck(sellOrderName.getFirst())) clock.start(randomizer());
                 if (!sellOrderName.isEmpty() && containerCheck(sellOrderName.getFirst()) && clock.shouldFire()) {
                     debug("book screen open, clicking slot 16");
-                    InventoryUtils.clickSlot(16, false);
+                    click(16, false);
                 }
 
                 if (containerCheck("At what price are you selling")) clock.start(randomizer());
                 if (containerCheck("At what price are you selling") && clock.shouldFire()) {
                     debug("price prompt, clicking slot 12");
-                    InventoryUtils.clickSlot(12, false);
+                    click(12, false);
                 }
 
                 if (containerCheck("Confirm")) clock.start(randomizer());
                 if (containerCheck("Confirm") && clock.shouldFire()) {
                     debug("confirm prompt, clicking slot 13 and removing " + sellOrderName.getFirst() + " from sell list");
-                    InventoryUtils.clickSlot(13, false);
+                    click(13, false);
                     sellOrderName.clear();
                     state = State.FETCHING;
 
                 }
 
 
+            }
+
+            case RECOVERY -> {
+                // Toparlanma: acik ekrani kapat, birkac yuz ms bekle, tum gecici
+                // bayraklari temizle ve akisi bastan dagit. Gorevler (task haritasi)
+                // SILINMEZ - sadece "yarim kalmis ekran/sayac" durumu temizlenir.
+                if (minecraft.screen instanceof AbstractSignEditScreen) {
+                    // Tabela ekrani konteyner degildir; closeContainer onu kapatmaz.
+                    minecraft.setScreen(null);
+                    return;
+                }
+                if (isContainerOpen()) {
+                    minecraft.player.closeContainer();
+                    return;
+                }
+
+                clock.start(1200);
+                if (clock.shouldFire()) {
+                    resetCombineCounters();
+                    activeBook = null;
+                    didRemoveOrder = false;
+                    claimedItems = false;
+                    didReceiveItems = false;
+                    isInventoryFull = false;
+                    useSecondPage = false;
+                    storePageFlipped = false;
+                    secondPageCheck = false;
+                    outbidClaimedAmount = 0;
+                    storedThisVisit = 0;
+                    sellOrderCancelled = false;
+                    Humanizer.reset();
+                    ActionLog.add(ActionLog.Tag.RECOVERY, "toparlandi, akis bastan dagitiliyor");
+                    state = State.START;
+                }
             }
         }
     }
@@ -1032,6 +1159,7 @@ public class BazaarFlipper implements Feature {
             // sayaçlar bir sonraki tura sızmasın.
             resetCombineCounters();
             lastState = state;
+            stateEnteredMs = System.currentTimeMillis();
         }
     }
 
@@ -1064,6 +1192,9 @@ public class BazaarFlipper implements Feature {
         }
         BookState old = t.getBookState();
         t.setBookState(target);
+        // Gorev ilerledi: hem state bekcisi hem "hic ilerleme yok" sayaci sifirlanir.
+        stateEnteredMs = System.currentTimeMillis();
+        lastProgressMs = stateEnteredMs;
         debug("Book state changed: " + book + " | " + old + " -> " + target
                 + " remaining=" + t.getAmountToOrder()
                 + " inv=" + t.inInventory
@@ -1285,6 +1416,9 @@ public class BazaarFlipper implements Feature {
             }
 
             task.put(book, newTask);
+            TradeHistory.begin(book);
+            ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level())
+                    + " hatti acildi - hedef " + amount + " adet");
 
             if (credit > 0) {
                 ChatUtils.clientMessage(book.name() + " icin elde " + credit + " birim ara seviye kitap var, siparis " + fullAmount + " yerine " + amount + " adet aciliyor.");
@@ -1389,6 +1523,7 @@ public class BazaarFlipper implements Feature {
             return;
         }
 
+        lastOrderAmount = orderAmount;
         String amountToOrder = String.valueOf(orderAmount);
         if (minecraft.screen instanceof AbstractSignEditScreen signScreen) {
             debug("writing amount=" + amountToOrder + " for book=" + activeBook);
@@ -1455,6 +1590,8 @@ public class BazaarFlipper implements Feature {
             return;
         }
         debug("Found outbid:" + book.getRomanLevel(book.level()));
+        TradeHistory.outbid(book);
+        ActionLog.add(ActionLog.Tag.OUTBID, book.getRomanLevel(book.level()) + " outbid yendi");
         editStateBook(book, BookState.OUTBID);
     }
 
@@ -1473,6 +1610,7 @@ public class BazaarFlipper implements Feature {
 
         for (Book book : booksInState) {
             if (!stripped.equals(book.getRomanLevel(book.level()))) continue;
+            ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level()) + " siparisi doldu");
             editStateBook(book, BookState.OUTBID);
             bazaarMonitor.finish(book);
         }
@@ -1485,17 +1623,105 @@ public class BazaarFlipper implements Feature {
         // KRİTİK: Delay'ler artık arayüzden elle girilebiliyor. nextInt(min, max)
         // max <= min iken IllegalArgumentException fırlatır ve bu HER TICK olur -
         // makro anında çöker. Bozuk aralıkta sabit bir değere düşüyoruz.
-        if (max <= min) return Math.max(50, min);
+        if (max <= min) return Humanizer.fixedDelay(Math.max(50, min));
 
-        int result = splittableRandom.nextInt(min, max);
-        if (result > 50) return result;
-        return 500;
+        // Duz rastgele yerine can egrisi + yorulma + mikro mola (Humanizer).
+        // Aralik ayni kaliyor, sadece dagilim insan davranisina benziyor.
+        return Humanizer.delay(min, max);
     }
 
 
     private int speedMode() {
-        if (GoofyConfig.INSTANCE.speedMode) return GoofyConfig.INSTANCE.speedModeDelay;
+        if (GoofyConfig.INSTANCE.speedMode) return Humanizer.fixedDelay(GoofyConfig.INSTANCE.speedModeDelay);
         return randomizer();
+    }
+
+    // =====================================================================
+    // Takilma bekcisi
+    // =====================================================================
+
+    /**
+     * Her state'in bir kum saati vardir. State degisince ya da bir tiklama
+     * yapilinca saat sifirlanir; yani "is yapiliyorsa" sure islemez. Saat dolarsa
+     * makro takilmis demektir: RECOVERY'e dusulur.
+     *
+     * 0 = bekci kapali. IDLE bilerek kapalidir: notEnoughCash durumunda 1 dakika
+     * BEKLEMEK zaten tasarimin parcasi.
+     */
+    private long stateTimeoutMs(State target) {
+        return switch (target) {
+            case START, IDLE, RECOVERY -> 0;
+            case FETCHING -> 60_000;
+            case STARTUP_CHECK -> 30_000;
+            case BAZAAR_NAVIGATION -> 25_000;
+            case OUTBID -> 30_000;
+            case STORE -> 30_000;
+            case ANVIL -> 30_000;
+            case COMBINE -> 30_000;
+            case SELL -> 30_000;
+            case REPLACE_SELL -> 45_000;
+        };
+    }
+
+    private void watchdog() {
+        if (state == State.RECOVERY) return;
+
+        long now = System.currentTimeMillis();
+        if (stateEnteredMs == 0) stateEnteredMs = now;
+        if (lastProgressMs == 0) lastProgressMs = now;
+
+        long limit = stateTimeoutMs(state);
+        boolean stateStuck = limit > 0 && (now - stateEnteredMs) > limit;
+
+        // IDLE'in kendi zaman asimi YOKTUR (siparislerin dolmasini beklemek normal).
+        // Tek istisna: ortada hic gorev yoksa ve uzun suredir hicbir sey olmuyorsa
+        // fiyatlari yeniden cekmek gerekir.
+        boolean idleEmpty = state == State.IDLE
+                && task.isEmpty()
+                && !notEnoughCash
+                && (now - stateEnteredMs) > IDLE_EMPTY_TIMEOUT_MS;
+
+        if (!stateStuck && !idleEmpty) return;
+
+        if (state == recoverFromState) {
+            recoveryCount++;
+        } else {
+            recoverFromState = state;
+            recoveryCount = 1;
+        }
+
+        String reason = stateStuck
+                ? state + " durumunda " + (limit / 1000) + " sn ilerleme olmadi"
+                : "10 dakikadir ortada hic gorev yok, fiyatlar yeniden cekiliyor";
+
+        if (recoveryCount >= MAX_RECOVERY_ATTEMPTS) {
+            ActionLog.add(ActionLog.Tag.RECOVERY, "ayni yerde " + MAX_RECOVERY_ATTEMPTS
+                    + " kez takilindi - makro durduruluyor: " + reason);
+            ChatUtils.clientMessage("Ayni yerde " + MAX_RECOVERY_ATTEMPTS
+                    + " kez takilindi (" + reason + "). Makro guvenlik icin durduruluyor.");
+            FeatureManager.INSTANCE.stop();
+            return;
+        }
+
+        ActionLog.add(ActionLog.Tag.RECOVERY, reason + " - toparlaniyor ("
+                + recoveryCount + "/" + MAX_RECOVERY_ATTEMPTS + ")");
+        ChatUtils.clientMessage("Takilma tespit edildi: " + reason + ". Toparlaniyor...");
+
+        state = State.RECOVERY;
+        stateEnteredMs = now;
+        lastProgressMs = now;
+    }
+
+    /**
+     * Tiklamalarin TEK gecis noktasi. Buradan gecmesinin sebebi bekcinin saatini
+     * sifirlamak: gercekten is yapilan bir state zaman asimina ugramasin.
+     */
+    private void click(int slot, boolean shift) {
+        stateEnteredMs = System.currentTimeMillis();
+        // Mikro mola sayaci SADECE burada ilerler - gecikme fonksiyonu her tick
+        // cagriliyor, oraya baglansaydi mola saniyede bir tetiklenirdi.
+        Humanizer.noteAction();
+        InventoryUtils.clickSlot(slot, shift);
     }
 
 
