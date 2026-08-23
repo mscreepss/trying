@@ -20,7 +20,8 @@ public enum KeyAction {
     PAUSE_RESUME("Pause / Resume", "Oldugu yerde dondurur, ayni noktadan devam eder", -1),
     STOP("Stop", "Makroyu tamamen durdurur ve gorevleri temizler", -1),
     RELOAD_CONFIG("Reload Config", "Config dosyasini diskten yeniden okur", -1),
-    MOVE_HUD("Move HUD", "HUD'u surukle-birak ile tasima moduna girer", -1);
+    MOVE_HUD("Move HUD", "HUD'u surukle-birak ile tasima moduna girer", -1),
+    HUD_MODE("HUD Mode", "HUD'da All-time / Session arasinda gecis yapar", GLFW.GLFW_KEY_V);
 
     private final String title;
     private final String description;
@@ -53,6 +54,7 @@ public enum KeyAction {
             case STOP -> k.stop;
             case RELOAD_CONFIG -> k.reloadConfig;
             case MOVE_HUD -> k.moveHud;
+            case HUD_MODE -> k.hudMode;
         };
     }
 
@@ -65,6 +67,7 @@ public enum KeyAction {
             case STOP -> k.stop = code;
             case RELOAD_CONFIG -> k.reloadConfig = code;
             case MOVE_HUD -> k.moveHud = code;
+            case HUD_MODE -> k.hudMode = code;
         }
         GoofyConfig.save();
     }
