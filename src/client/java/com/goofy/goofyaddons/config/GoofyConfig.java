@@ -33,6 +33,24 @@ public class GoofyConfig {
     public String firstPage = "ec";
     public String secondPage = "ec 2";
 
+    // --- Session planlayici (BETA) ---
+    /** Kapali gelir: beta oldugu icin kullanici acikca acmadan calismaz. */
+    public boolean sessionPlannerEnabled = false;
+    public int workMinMinutes = 20;
+    public int workMaxMinutes = 40;
+    public int breakMinMinutes = 3;
+    public int breakMaxMinutes = 10;
+
+    /**
+     * Kapatilmis kitap hatlari: "ID|level" bicminde.
+     *
+     * NEDEN AYRI LISTE: Book bir record ve mevcut config dosyalarinda "enabled"
+     * alani yok. Record'a alan eklemek eski JSON'lardaki tum kitaplari KAPALI
+     * yapardi (bos boolean = false). Ayri bir liste tutunca varsayilan her zaman
+     * "acik" olur ve kimsenin config'i bozulmaz.
+     */
+    public List<String> disabledBooks = new ArrayList<>();
+
     // Kalıcı bazaar ekonomi istatistikleri (EconomyTracker)
     public double totalSpend = 0;
     public double totalEarn = 0;
@@ -97,6 +115,30 @@ public class GoofyConfig {
         save();
     }
 
+    // =====================================================================
+    // Kitap acik/kapali
+    // =====================================================================
+
+    private static String bookKey(Book book) {
+        return book.id() + "|" + book.level();
+    }
+
+    public static boolean isBookEnabled(Book book) {
+        if (INSTANCE == null || INSTANCE.disabledBooks == null) return true;
+        return !INSTANCE.disabledBooks.contains(bookKey(book));
+    }
+
+    public static synchronized void setBookEnabled(Book book, boolean enabled) {
+        if (INSTANCE == null) return;
+        if (INSTANCE.disabledBooks == null) INSTANCE.disabledBooks = new ArrayList<>();
+        List<String> copy = new ArrayList<>(INSTANCE.disabledBooks);
+        String key = bookKey(book);
+        copy.remove(key);
+        if (!enabled) copy.add(key);
+        INSTANCE.disabledBooks = copy;
+        save();
+    }
+
     /** Aynı id + level ikilisi zaten var mı? (aynı hattın iki kez tanımlanması hataya yol açar) */
     public static boolean hasBook(String id, int level, int ignoreIndex) {
         if (INSTANCE == null) return false;
@@ -126,6 +168,12 @@ public class GoofyConfig {
         // Eski config dosyalarında bu alanlar yok - null gelmesinler.
         if (INSTANCE.books == null) INSTANCE.books = new ArrayList<>();
         if (INSTANCE.keys == null) INSTANCE.keys = new Keys();
+        if (INSTANCE.disabledBooks == null) INSTANCE.disabledBooks = new ArrayList<>();
+        // Eski config'lerde bu alanlar 0 gelir; 0 dakika = sonsuz dongu demek.
+        if (INSTANCE.workMinMinutes <= 0) INSTANCE.workMinMinutes = 20;
+        if (INSTANCE.workMaxMinutes <= INSTANCE.workMinMinutes) INSTANCE.workMaxMinutes = INSTANCE.workMinMinutes + 20;
+        if (INSTANCE.breakMinMinutes <= 0) INSTANCE.breakMinMinutes = 3;
+        if (INSTANCE.breakMaxMinutes <= INSTANCE.breakMinMinutes) INSTANCE.breakMaxMinutes = INSTANCE.breakMinMinutes + 7;
     }
 
     public static void save() {
