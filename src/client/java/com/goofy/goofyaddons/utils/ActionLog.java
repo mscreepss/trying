@@ -85,8 +85,8 @@ public final class ActionLog {
         });
 
         loadFromDisk();
-        add(Tag.SEPARATOR, "yeni oturum - " + LocalDateTime.now().format(STAMP)
-                + "  (ustu onceki oturum)");
+        add(Tag.SEPARATOR, "new session - " + LocalDateTime.now().format(STAMP)
+                + "  (above is the previous session)");
     }
 
     /** Yeni bir satır ekler. Diske yazma işi ertelenir - bu çağrı hızlıdır. */
