@@ -20,7 +20,8 @@ public enum KeyAction {
     PAUSE_RESUME("Pause / Resume", "Freeze in place, continue from the same point", -1),
     STOP("Stop", "Stop the macro and clear all tasks", -1),
     RELOAD_CONFIG("Reload Config", "Re-read the config file from disk", -1),
-    HUD_MODE("HUD Mode", "Switch the Profit HUD between All-time / Session", GLFW.GLFW_KEY_V);
+    HUD_MODE("HUD Mode", "Switch the Profit HUD between All-time / Session", GLFW.GLFW_KEY_V),
+    ONLY_SELL("Only Sell", "Stop opening new lines, finish and sell what you have", -1);
 
     private final String title;
     private final String description;
@@ -53,6 +54,7 @@ public enum KeyAction {
             case STOP -> k.stop;
             case RELOAD_CONFIG -> k.reloadConfig;
             case HUD_MODE -> k.hudMode;
+            case ONLY_SELL -> k.onlySell;
         };
     }
 
@@ -65,6 +67,7 @@ public enum KeyAction {
             case STOP -> k.stop = code;
             case RELOAD_CONFIG -> k.reloadConfig = code;
             case HUD_MODE -> k.hudMode = code;
+            case ONLY_SELL -> k.onlySell = code;
         }
         GoofyConfig.save();
     }

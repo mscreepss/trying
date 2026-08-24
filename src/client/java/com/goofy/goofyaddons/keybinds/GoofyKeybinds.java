@@ -2,9 +2,11 @@ package com.goofy.goofyaddons.keybinds;
 
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
+import com.goofy.goofyaddons.features.bookflipper.helper.OnlySellMode;
 import com.goofy.goofyaddons.features.economy.EconomyTracker;
 import com.goofy.goofyaddons.ui.BaseScreen;
 import com.goofy.goofyaddons.ui.GoofyScreen;
+import com.goofy.goofyaddons.utils.ActionLog;
 import com.goofy.goofyaddons.utils.ChatUtils;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
@@ -97,6 +99,7 @@ public final class GoofyKeybinds {
                 ChatUtils.clientMessage("Config reloaded from disk.");
             }
             case HUD_MODE -> toggleHudMode();
+            case ONLY_SELL -> toggleOnlySell();
         }
     }
 
@@ -116,6 +119,19 @@ public final class GoofyKeybinds {
             return;
         }
         FeatureManager.INSTANCE.stop();
+    }
+
+    /** Only Sell modunu ac/kapa - hem tustan hem arayuzdeki anahtardan cagrilir. */
+    public static void toggleOnlySell() {
+        announceOnlySell(OnlySellMode.toggle());
+    }
+
+    /** Arayuzdeki anahtar da ayni mesaji versin diye ayri metot. */
+    public static void announceOnlySell(boolean on) {
+        ChatUtils.clientMessage(on
+                ? "Only Sell ON - no new lines will be opened; finishing what you have."
+                : "Only Sell OFF - normal buying resumed.");
+        ActionLog.add(ActionLog.Tag.SYSTEM, on ? "only sell mode enabled" : "only sell mode disabled");
     }
 
     public static void toggleHudMode() {
