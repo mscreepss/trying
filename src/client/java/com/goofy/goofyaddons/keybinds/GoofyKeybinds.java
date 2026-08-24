@@ -3,8 +3,8 @@ package com.goofy.goofyaddons.keybinds;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.economy.EconomyTracker;
+import com.goofy.goofyaddons.ui.BaseScreen;
 import com.goofy.goofyaddons.ui.GoofyScreen;
-import com.goofy.goofyaddons.ui.HudEditScreen;
 import com.goofy.goofyaddons.utils.ChatUtils;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.Minecraft;
@@ -42,8 +42,19 @@ public final class GoofyKeybinds {
 
             if (pressedNow && !wasDown) {
                 down.add(action);
-                // Ekran açıkken tetikleme yok; ama tuşun "basıldı" durumunu yine de
-                // kaydediyoruz ki ekran kapandığında hayalet tetikleme olmasın.
+
+                // MENU TUSU AC/KAPA: Ekran acikken de calisir - bizim ekranimizsa
+                // kapatir. Buradan yapiliyor cunku Screen#keyPressed'in tasidigi
+                // KeyEvent record'unun alan adlari surumden surume degisiyor;
+                // GLFW'yi dogrudan okumak her surumde ayni sekilde calisiyor.
+                if (action == KeyAction.MENU) {
+                    toggleMenu(minecraft);
+                    continue;
+                }
+
+                // Diger eylemler ekran acikken tetiklenmez; ama tusun "basildi"
+                // durumu yine de kaydedilir ki ekran kapandiginda hayalet
+                // tetikleme olmasin.
                 if (!screenOpen) fire(action);
             } else if (!pressedNow && wasDown) {
                 down.remove(action);
@@ -51,17 +62,39 @@ public final class GoofyKeybinds {
         }
     }
 
+    /**
+     * Menu tusu: kapaliysa acar, bizim ekranimiz aciksa kapatir.
+     * Bir metin kutusuna yaziliyorsa hicbir sey yapmaz - yoksa "m" harfi yazilamazdi.
+     */
+    private static void toggleMenu(Minecraft minecraft) {
+        if (minecraft.screen == null) {
+            minecraft.setScreen(new GoofyScreen());
+            return;
+        }
+        if (minecraft.screen instanceof GoofyScreen screen) {
+            if (screen.consumeCapture()) return;
+            if (screen.isTyping()) return;
+            screen.onClose();
+            return;
+        }
+        if (minecraft.screen instanceof BaseScreen screen) {
+            screen.onClose();
+        }
+        // Baska bir ekran (bazaar, envanter...) aciksa dokunmuyoruz.
+    }
+
     private static void fire(KeyAction action) {
         Minecraft minecraft = Minecraft.getInstance();
         switch (action) {
-            case MENU -> minecraft.setScreen(new GoofyScreen());
-            case MOVE_HUD -> minecraft.setScreen(new HudEditScreen());
+            case MENU -> {
+                // toggleMenu tarafindan islenir.
+            }
             case START -> startMacro();
             case PAUSE_RESUME -> togglePause();
             case STOP -> stopMacro();
             case RELOAD_CONFIG -> {
                 GoofyConfig.load();
-                ChatUtils.clientMessage("Config yeniden yuklendi.");
+                ChatUtils.clientMessage("Config reloaded from disk.");
             }
             case HUD_MODE -> toggleHudMode();
         }
@@ -71,7 +104,7 @@ public final class GoofyKeybinds {
 
     public static void startMacro() {
         if (FeatureManager.INSTANCE.isMacroRunning()) {
-            ChatUtils.clientMessage("Makro zaten calisiyor.");
+            ChatUtils.clientMessage("Macro is already running.");
             return;
         }
         FeatureManager.INSTANCE.start("BazaarFlipper");
@@ -79,7 +112,7 @@ public final class GoofyKeybinds {
 
     public static void stopMacro() {
         if (!FeatureManager.INSTANCE.isMacroRunning()) {
-            ChatUtils.clientMessage("Makro zaten durmus durumda.");
+            ChatUtils.clientMessage("Macro is already stopped.");
             return;
         }
         FeatureManager.INSTANCE.stop();
@@ -87,17 +120,17 @@ public final class GoofyKeybinds {
 
     public static void toggleHudMode() {
         EconomyTracker.toggleMode();
-        ChatUtils.clientMessage("Economy HUD: " + EconomyTracker.getModeLabel() + " modu");
+        ChatUtils.clientMessage("Profit HUD: " + EconomyTracker.getModeLabel());
     }
 
     public static void togglePause() {
         if (!FeatureManager.INSTANCE.isMacroRunning()) {
-            ChatUtils.clientMessage("Once makroyu baslatmalisin.");
+            ChatUtils.clientMessage("Start the macro first.");
             return;
         }
         boolean nowPaused = FeatureManager.INSTANCE.toggleManualPause();
         ChatUtils.clientMessage(nowPaused
-                ? "Makro duraklatildi - kaldigi yerden devam edecek."
-                : "Makro devam ediyor.");
+                ? "Macro paused - it will continue from where it left off."
+                : "Macro resumed.");
     }
 }
