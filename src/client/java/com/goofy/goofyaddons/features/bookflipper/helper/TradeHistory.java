@@ -305,7 +305,7 @@ public final class TradeHistory {
             if (loaded.stats == null) loaded.stats = new LinkedHashMap<>();
             store = loaded;
         } catch (Exception e) {
-            ActionLog.add(ActionLog.Tag.SYSTEM, "gecmis dosyasi okunamadi, sifirdan baslaniyor");
+            ActionLog.add(ActionLog.Tag.SYSTEM, "history file could not be read - starting fresh");
         }
     }
 

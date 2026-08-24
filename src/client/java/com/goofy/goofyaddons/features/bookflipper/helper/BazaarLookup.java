@@ -111,6 +111,11 @@ public final class BazaarLookup {
         return data.get(productId);
     }
 
+    /** Bazaar'daki tum urun kimlikleri (ItemCatalog aramayi bunun uzerine kuruyor). */
+    public static java.util.Set<String> productIds() {
+        return data.keySet();
+    }
+
     public static boolean exists(String productId) {
         return get(productId) != null;
     }
