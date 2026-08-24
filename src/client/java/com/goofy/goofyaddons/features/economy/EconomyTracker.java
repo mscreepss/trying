@@ -3,6 +3,7 @@ package com.goofy.goofyaddons.features.economy;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.event.ChatHook;
 import com.goofy.goofyaddons.features.FeatureManager;
+import com.goofy.goofyaddons.features.bookflipper.helper.OnlySellMode;
 import net.minecraft.client.Minecraft;
 
 import java.util.regex.Matcher;
@@ -113,6 +114,10 @@ public class EconomyTracker {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || minecraft.level == null) return false;
         if (minecraft.isPaused()) return false;
+        // ONLY SELL: alim fazi bittiginde sayac durur. O andan sonrasi kar
+        // uretmiyor, sadece eldekini tasfiye ediyor; sure orayi da sayarsa
+        // "saatte ne kadar kar" orani gercegi gostermez.
+        if (OnlySellMode.pauseUptime()) return false;
         return FeatureManager.INSTANCE.isMacroActive();
     }
 
