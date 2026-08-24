@@ -111,6 +111,25 @@ public final class BookPresets {
         }
     }
 
+    public static boolean has(String id, int level) {
+        for (Preset preset : presets) {
+            if (preset.id.equalsIgnoreCase(id) && preset.level == level) return true;
+        }
+        return false;
+    }
+
+    public static synchronized void addBook(com.goofy.goofyaddons.features.bookflipper.helper.Book book) {
+        presets.add(new Preset(book.id(), book.name(), book.level(), book.sellLevel()));
+        save();
+        status = presets.size() + " saved books";
+    }
+
+    public static synchronized void replace(int index, com.goofy.goofyaddons.features.bookflipper.helper.Book book) {
+        if (index < 0 || index >= presets.size()) return;
+        presets.set(index, new Preset(book.id(), book.name(), book.level(), book.sellLevel()));
+        save();
+    }
+
     /** Aktif kitaplardan hazir sete kaydeder (Presets sayfasindaki dugme). */
     public static synchronized void addFromBook(com.goofy.goofyaddons.features.bookflipper.helper.Book book) {
         for (Preset preset : presets) {

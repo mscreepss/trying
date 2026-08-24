@@ -33,6 +33,12 @@ public class GoofyConfig {
     public String firstPage = "ec";
     public String secondPage = "ec 2";
 
+    /**
+     * Only Sell modu: yeni hat acilmaz, eldekiler bitirilip satilir.
+     * Ayrintili aciklama OnlySellMode sinifinda.
+     */
+    public boolean onlySellMode = false;
+
     // --- Session planlayici (BETA) ---
     /** Kapali gelir: beta oldugu icin kullanici acikca acmadan calismaz. */
     public boolean sessionPlannerEnabled = false;
@@ -91,6 +97,8 @@ public class GoofyConfig {
         public int moveHud = -1;
         /** HUD All-time <-> Session gecisi. Eski surumdeki V tusu korundu. */
         public int hudMode = GLFW.GLFW_KEY_V;
+        /** Only Sell modunu ac/kapa. Varsayilan atanmamis. */
+        public int onlySell = -1;
     }
 
     // =====================================================================
