@@ -1,6 +1,10 @@
 package com.goofy.goofyaddons.ui;
 
+import com.goofy.goofyaddons.utils.Clipboard;
+import com.mojang.blaze3d.platform.InputConstants;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import org.lwjgl.glfw.GLFW;
 
 /**
  * Minimal widget seti. Vanilla Button/EditBox kullanmıyoruz: hem görünüm tamamen
@@ -92,6 +96,13 @@ public final class Widgets {
         public boolean numeric = false;
         public boolean focused = false;
         public int maxLength = 64;
+        /**
+         * Ctrl+A ile "hepsi seçili" durumu. Tam bir seçim modeli yok (imleç tek
+         * konumda); seçiliyken yazılan ilk karakter ya da Backspace kutuyu
+         * temizler, Ctrl+C tamamını kopyalar. Kullanıcı açısından beklenen
+         * davranışın tamamı bu üçü.
+         */
+        public boolean selectedAll = false;
         /** Değer her değiştiğinde çağrılır (canlı kaydetmek için). */
         public Runnable onChange;
 
@@ -131,6 +142,37 @@ public final class Widgets {
             caretTimer++;
         }
 
+        /** Ctrl basılı mı? Tuş olayının modifier alanı sürüme bağlı, GLFW'yi doğrudan okuyoruz. */
+        private static boolean ctrlDown() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.getWindow() == null) return false;
+            return InputConstants.isKeyDown(minecraft.getWindow(), GLFW.GLFW_KEY_LEFT_CONTROL)
+                    || InputConstants.isKeyDown(minecraft.getWindow(), GLFW.GLFW_KEY_RIGHT_CONTROL);
+        }
+
+        private void insert(String text) {
+            if (text == null || text.isEmpty()) return;
+            String base = selectedAll ? "" : value;
+            selectedAll = false;
+
+            StringBuilder out = new StringBuilder(base);
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (out.length() >= maxLength) break;
+                if (numeric) {
+                    if (c < '0' || c > '9') continue;
+                } else if (c < 32 || c == 127) {
+                    continue;
+                }
+                out.append(c);
+            }
+
+            String result = out.toString();
+            if (result.equals(value)) return;
+            value = result;
+            if (onChange != null) onChange.run();
+        }
+
         public void render(GuiGraphicsExtractor g, int mouseX, int mouseY) {
             boolean hover = Draw.inside(mouseX, mouseY, x, y, w, h);
             int stroke = focused ? Theme.ACCENT : (hover ? Theme.HOVER : Theme.STROKE);
@@ -141,6 +183,9 @@ public final class Widgets {
             int color = value.isEmpty() && !focused ? Theme.TEXT_FAINT : Theme.TEXT;
 
             String clipped = Draw.clip(shown, w - 12);
+            if (selectedAll && !value.isEmpty()) {
+                Draw.rect(g, x + 5, textY - 1, Math.min(Draw.textWidth(clipped) + 2, w - 10), 10, Theme.ACCENT_SOFT);
+            }
             Draw.text(g, clipped, x + 6, textY, color);
 
             if (focused && (caretTimer / 6) % 2 == 0) {
@@ -153,14 +198,52 @@ public final class Widgets {
             boolean hit = Draw.inside(mouseX, mouseY, x, y, w, h);
             focused = hit;
             if (hit) caretTimer = 0;
+            if (!hit) selectedAll = false;
             return hit;
         }
 
-        /** Backspace vb. Değer değiştiyse true döner. */
+        /** Backspace, kısayollar vb. Tuş yutulduysa true döner. */
         public boolean keyPressed(int keyCode) {
             if (!focused) return false;
+
+            if (ctrlDown()) {
+                switch (keyCode) {
+                    case GLFW.GLFW_KEY_A -> {
+                        selectedAll = !value.isEmpty();
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_C -> {
+                        Clipboard.set(value);
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_X -> {
+                        Clipboard.set(value);
+                        if (!value.isEmpty()) {
+                            value = "";
+                            selectedAll = false;
+                            if (onChange != null) onChange.run();
+                        }
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_V -> {
+                        insert(Clipboard.get().replace("\n", " ").trim());
+                        return true;
+                    }
+                    default -> {
+                    }
+                }
+            }
+
             // 259 = BACKSPACE, 257 = ENTER, 335 = KP_ENTER
             if (keyCode == 259) {
+                if (selectedAll) {
+                    selectedAll = false;
+                    if (!value.isEmpty()) {
+                        value = "";
+                        if (onChange != null) onChange.run();
+                    }
+                    return true;
+                }
                 if (!value.isEmpty()) {
                     value = value.substring(0, value.length() - 1);
                     if (onChange != null) onChange.run();
@@ -169,6 +252,7 @@ public final class Widgets {
             }
             if (keyCode == 257 || keyCode == 335) {
                 focused = false;
+                selectedAll = false;
                 return true;
             }
             return false;
@@ -176,15 +260,17 @@ public final class Widgets {
 
         public boolean charTyped(char chr) {
             if (!focused) return false;
-            if (value.length() >= maxLength) return true;
-            if (numeric) {
-                if (chr < '0' || chr > '9') return true;
-            } else if (chr < 32 || chr == 127) {
-                return true;
-            }
-            value = value + chr;
-            if (onChange != null) onChange.run();
+            // Ctrl basiliyken gelen karakterler kisayolun kendisidir, metne girmesin.
+            if (ctrlDown()) return true;
+            insert(String.valueOf(chr));
             return true;
+        }
+
+        /** Kutunun icerigini disaridan ayarlar (arama sonucu vb.). */
+        public void setValue(String newValue) {
+            value = newValue == null ? "" : newValue;
+            selectedAll = false;
+            if (onChange != null) onChange.run();
         }
     }
 

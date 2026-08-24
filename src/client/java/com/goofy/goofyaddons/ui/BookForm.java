@@ -1,5 +1,6 @@
 package com.goofy.goofyaddons.ui;
 
+import com.goofy.goofyaddons.config.BookPresets;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.bookflipper.helper.BazaarLookup;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
@@ -37,6 +38,14 @@ import java.util.Map;
  */
 public class BookForm {
 
+    /** Kaydedince nereye yazilacak. */
+    public enum Target {
+        /** Presets sayfasi: kitap kutuphaneye eklenir. */
+        PRESET,
+        /** Config sayfasi: dogrudan aktif kitap listesi duzenlenir. */
+        CONFIG
+    }
+
     private enum Overlay {
         NONE,
         SEARCH,
@@ -48,6 +57,7 @@ public class BookForm {
     private static final double TAX = 0.0125;
 
     private final int editIndex; // -1 = yeni kayıt
+    private final Target target;
     private final Runnable onClose;
 
     private final Widgets.TextBox idBox;
@@ -86,7 +96,12 @@ public class BookForm {
     }
 
     public BookForm(Book existing, int editIndex, Runnable onClose) {
+        this(existing, editIndex, Target.CONFIG, onClose);
+    }
+
+    public BookForm(Book existing, int editIndex, Target target, Runnable onClose) {
         this.editIndex = editIndex;
+        this.target = target;
         this.onClose = onClose;
 
         idBox = new Widgets.TextBox(existing == null ? "" : existing.id())
@@ -192,7 +207,8 @@ public class BookForm {
         Draw.panel(g, x, y, w, h, Theme.WINDOW, Theme.STROKE);
         Draw.rect(g, x + 1, y + 1, w - 2, 1, Theme.ACCENT);
 
-        Draw.text(g, editIndex < 0 ? "New Book" : "Edit Book", x + 18, y + 18, Theme.TEXT);
+        Draw.text(g, (editIndex < 0 ? "New Book" : "Edit Book")
+                + (target == Target.PRESET ? "  (preset)" : ""), x + 18, y + 18, Theme.TEXT);
         Draw.text(g, "You don't have to type the ID by hand", x + 18, y + 32, Theme.TEXT_FAINT);
 
         label(g, "BAZAAR ID", idBox);
@@ -448,7 +464,9 @@ public class BookForm {
                     InventoryBook entry = inventoryBooks.get(index);
                     idBox.value = entry.baseId();
                     nameBox.value = entry.name();
-                    levelBox.value = String.valueOf(entry.level());
+                    levelBox.value = "1";
+                    int max = ItemCatalog.maxLevel(entry.baseId());
+                    sellLevelBox.value = String.valueOf(max > 1 ? max : 5);
                     error = null;
                     overlay = Overlay.NONE;
                 });
@@ -565,13 +583,29 @@ public class BookForm {
         error = null;
     }
 
+    /**
+     * Secilen adayi forma yazar.
+     *
+     * ESKI HATA: isim yalnizca kutu BOSSA dolduruluyordu; ikinci bir kitap
+     * secildiginde eski isim oldugu gibi kaliyordu ve yanlis lore eslesmesi
+     * yuzunden hat hic calismiyordu. Artik HER secimde uc alan da yeniden yazilir.
+     */
     private void applyPendingChoice() {
         if (pendingChoice == null) {
             overlay = Overlay.NONE;
             return;
         }
         idBox.value = pendingChoice.baseId();
-        if (nameBox.value.isBlank()) nameBox.value = pendingChoice.displayName();
+        nameBox.value = pendingChoice.displayName();
+
+        // Varsayilanlar: alim her zaman level 1, satis o kitabin bazaar'daki
+        // EN YUKSEK seviyesi. Her kitap 5 seviye degil - sabit 5 yazmak yanlis
+        // miktar hesabina yol acardi.
+        levelBox.value = "1";
+        int max = ItemCatalog.maxLevel(pendingChoice.baseId());
+        sellLevelBox.value = String.valueOf(max > 1 ? max : 5);
+
+        for (Widgets.TextBox box : boxes) box.selectedAll = false;
         pendingChoice = null;
         overlay = Overlay.NONE;
         error = null;
@@ -668,8 +702,19 @@ public class BookForm {
             error = "Sell level must be higher than the buy level.";
             return;
         }
-        if (GoofyConfig.hasBook(id, level, editIndex)) {
+
+        int max = ItemCatalog.maxLevel(id);
+        if (max > 0 && sellLevel > max) {
+            error = "This book only goes up to level " + max + " on the bazaar.";
+            return;
+        }
+
+        if (target == Target.CONFIG && GoofyConfig.hasBook(id, level, editIndex)) {
             error = "This ID + level is already configured.";
+            return;
+        }
+        if (target == Target.PRESET && editIndex < 0 && BookPresets.has(id, level)) {
+            error = "This ID + level is already saved in presets.";
             return;
         }
         // KAYDETMEDEN DOGRULAMA: bazaar verisi yuklendiyse ID'nin gercekten var
@@ -680,7 +725,13 @@ public class BookForm {
         }
 
         Book book = new Book(id, level, sellLevel, name);
-        if (editIndex < 0) {
+        if (target == Target.PRESET) {
+            if (editIndex < 0) {
+                BookPresets.addBook(book);
+            } else {
+                BookPresets.replace(editIndex, book);
+            }
+        } else if (editIndex < 0) {
             GoofyConfig.addBook(book);
         } else {
             GoofyConfig.replaceBook(editIndex, book);
