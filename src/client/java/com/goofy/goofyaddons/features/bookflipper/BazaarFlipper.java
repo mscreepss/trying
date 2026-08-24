@@ -8,6 +8,7 @@ import com.goofy.goofyaddons.features.bookflipper.helper.BazaarMonitor;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipCalculator;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipItem;
+import com.goofy.goofyaddons.features.bookflipper.helper.OnlySellMode;
 import com.goofy.goofyaddons.features.bookflipper.helper.TradeHistory;
 import com.goofy.goofyaddons.ui.GoofyGui;
 import com.goofy.goofyaddons.utils.*;
@@ -140,6 +141,10 @@ public class BazaarFlipper implements Feature {
 
     // --- canli log icin sayaclar ---
     private int lastOrderAmount = 0;
+    /** Satisa cikarilirken okunan birim fiyat - izlemeye bu fiyatla kaydediliyor. */
+    private double pendingSellPrice = 0;
+    /** Satis emri outbid yendi mi? IDLE bunu gorunce REPLACE_SELL'e gecer. */
+    private boolean sellOutbidPending = false;
     private int outbidClaimedAmount = 0;
     private int storedThisVisit = 0;
     private boolean sellOrderCancelled = false;
@@ -189,6 +194,7 @@ public class BazaarFlipper implements Feature {
         ChatHook.onMessage("filled", this::handleFilledMessage);
         ChatHook.onMessage("Claimed", this::handleClaimedMessage);
         bazaarMonitor.hook(this::handleOutbid);
+        bazaarMonitor.hookSell(this::handleSellOutbid);
     }
 
     @Override
@@ -222,6 +228,9 @@ public class BazaarFlipper implements Feature {
         recoverFromState = null;
         recoveryCount = 0;
         TradeHistory.clearActive();
+        sellOutbidPending = false;
+        pendingSellPrice = 0;
+        OnlySellMode.setPhase(OnlySellMode.Phase.OFF);
         Humanizer.reset();
         ActionLog.add(ActionLog.Tag.SYSTEM, "macro stopped");
 
@@ -250,6 +259,7 @@ public class BazaarFlipper implements Feature {
         if (minecraft.player == null || minecraft.level == null) return;
 
         bazaarMonitor.onTick();
+        updateOnlySellPhase();
         lastStateCheck();
         watchdog();
         // watchdog makroyu tamamen durdurmus olabilir; durdurulmus makro tiklamaya devam etmesin.
@@ -363,6 +373,18 @@ public class BazaarFlipper implements Feature {
                         debug("1 Minute clock ended, switching to REPLACE_SELL");
                         state = State.REPLACE_SELL;
                     }
+                    return;
+                }
+
+                // ONLY SELL: alim tarafi tamamen bittiyse ve satis emrimiz
+                // outbid yendiyse, acik satislari guncel fiyattan yeniden
+                // listelemek icin REPLACE_SELL'e gec.
+                if (sellOutbidPending && OnlySellMode.sellOutbidActive()) {
+                    sellOutbidPending = false;
+                    sellOrderName.clear();
+                    ActionLog.add(ActionLog.Tag.SELL, "sell order was outbid - relisting at the current price");
+                    ChatUtils.clientMessage("Sell order was outbid - relisting.");
+                    state = State.REPLACE_SELL;
                     return;
                 }
 
@@ -970,6 +992,9 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("At what price are you selling")) clock.start(randomizer());
                 if (containerCheck("At what price are you selling") && clock.shouldFire()) {
                     debug("price prompt, clicking slot 12");
+                    // Fiyati TIKLAMADAN ONCE oku: satis emrini bu fiyatla
+                    // izlemeye alacagiz, outbid tespiti buna gore yapiliyor.
+                    pendingSellPrice = inventoryScanner.getUnitPrice(12);
                     click(12, false);
                 }
 
@@ -984,6 +1009,12 @@ public class BazaarFlipper implements Feature {
                             + ": " + (sellOrderCancelled ? "open sell order cancelled, " : "")
                             + "listed " + Math.max(1, listedAmount) + " in total");
                     sellOrderCancelled = false;
+
+                    // Satis emrini izlemeye al - outbid yenirse haberimiz olsun.
+                    if (pendingSellPrice > 0) {
+                        bazaarMonitor.add(soldBook, pendingSellPrice, true);
+                        pendingSellPrice = 0;
+                    }
 
                     // SURE OLCUMU BURADA BITER: ilk buy order -> sell order acilisi.
                     // Ayni isimden birden fazla hat ayni satis emrinde birlesebilir,
@@ -1070,6 +1101,7 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("At what price are you selling")) clock.start(randomizer());
                 if (containerCheck("At what price are you selling") && clock.shouldFire()) {
                     debug("price prompt, clicking slot 12");
+                    pendingSellPrice = inventoryScanner.getUnitPrice(12);
                     click(12, false);
                 }
 
@@ -1077,6 +1109,16 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("Confirm") && clock.shouldFire()) {
                     debug("confirm prompt, clicking slot 13 and removing " + sellOrderName.getFirst() + " from sell list");
                     click(13, false);
+
+                    // Yeniden listelenen emri de izlemeye al: bir daha outbid
+                    // yenirse yine yakalayalim.
+                    Book relisted = findBookBySellName(sellOrderName.getFirst());
+                    if (relisted != null && pendingSellPrice > 0) {
+                        bazaarMonitor.add(relisted, pendingSellPrice, true);
+                    }
+                    pendingSellPrice = 0;
+
+                    ActionLog.add(ActionLog.Tag.SELL, sellOrderName.getFirst() + " relisted at the current price");
                     sellOrderName.clear();
                     state = State.FETCHING;
 
@@ -1415,6 +1457,11 @@ public class BazaarFlipper implements Feature {
 
     private void processData() {
         if (flipItemsList.isEmpty()) return;
+
+        // ONLY SELL: yeni HAT acilmaz. Mevcut gorevler (SELECTED dahil) normal
+        // isler - outbid yenen bir siparis SELECTED'a doner ve yeniden acilmasi
+        // GEREKIR, yoksa havuz tek sayiya duser ve zincir yarim kalir.
+        if (OnlySellMode.blocksNewOrders()) return;
         debug("item check passed");
         double purse = scoreboardUtils.getPurse();
         debug("purse = " + purse);
@@ -1636,6 +1683,60 @@ public class BazaarFlipper implements Feature {
         didReceiveItems = true;
     }
 
+    /**
+     * Only Sell fazini her tick yeniden hesaplar.
+     *
+     * Alim fazinda (SELECTED / BUY_ORDER / OUTBID / STORE) tek bir gorev bile
+     * varsa FINISHING; hicbiri kalmadiysa SELL_ONLY. SELL_ONLY'ye gecildigi anda
+     * uptime sayaci durur ve satis outbid takibi devreye girer.
+     */
+    private void updateOnlySellPhase() {
+        if (!OnlySellMode.isEnabled()) {
+            OnlySellMode.setPhase(OnlySellMode.Phase.OFF);
+            return;
+        }
+
+        // Only Sell'de alim yapilmiyor; eski bir "para yetmiyor" bayragi
+        // takili kalirsa IDLE 60 sn sonra bosuna REPLACE_SELL'e kacar.
+        notEnoughCash = false;
+
+        boolean buying = false;
+        for (Task t : task.values()) {
+            if (BUY_PHASE.contains(t.getBookState())) {
+                buying = true;
+                break;
+            }
+        }
+
+        OnlySellMode.Phase next = buying ? OnlySellMode.Phase.FINISHING : OnlySellMode.Phase.SELL_ONLY;
+        if (next != OnlySellMode.phase()) {
+            ActionLog.add(ActionLog.Tag.SYSTEM, next == OnlySellMode.Phase.SELL_ONLY
+                    ? "only sell: buying finished - uptime paused, watching sell orders"
+                    : "only sell: finishing open buy orders");
+            if (next == OnlySellMode.Phase.SELL_ONLY) {
+                ChatUtils.clientMessage("Only Sell: no buy orders left. Uptime paused, now only selling.");
+            }
+        }
+        OnlySellMode.setPhase(next);
+    }
+
+    /** Config'te bu satis adina ("Wisdom V") sahip kitabi bulur. */
+    private Book findBookBySellName(String sellName) {
+        if (sellName == null || GoofyConfig.INSTANCE == null) return null;
+        for (Book book : GoofyConfig.INSTANCE.books) {
+            if (book.getRomanLevel(book.sellLevel()).equals(sellName)) return book;
+        }
+        return null;
+    }
+
+    /** Satis emri outbid yendi. Islemi IDLE yapar - burada sadece bayrak. */
+    private void handleSellOutbid(Book book) {
+        sellOutbidPending = true;
+        ActionLog.add(ActionLog.Tag.OUTBID,
+                book.getRomanLevel(book.sellLevel()) + " sell order was outbid");
+        bazaarMonitor.finishSell(book);
+    }
+
     private void handleOutbid(Book book) {
         Task t = task.get(book);
         if (t == null || !BUY_PHASE.contains(t.getBookState())) {
@@ -1734,6 +1835,7 @@ public class BazaarFlipper implements Feature {
         // fiyatlari yeniden cekmek gerekir.
         boolean idleEmpty = state == State.IDLE
                 && task.isEmpty()
+                && !OnlySellMode.isEnabled()
                 && !notEnoughCash
                 && (now - stateEnteredMs) > IDLE_EMPTY_TIMEOUT_MS;
 
