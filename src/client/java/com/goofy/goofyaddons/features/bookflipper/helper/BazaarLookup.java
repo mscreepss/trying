@@ -45,6 +45,12 @@ public final class BazaarLookup {
     private BazaarLookup() {
     }
 
+    /** "Refresh" butonu: onbellek suresini yok sayip hemen yeniden ceker. */
+    public static void forceRefresh() {
+        lastLoadMs = 0;
+        refreshIfStale();
+    }
+
     /** Arayüz her çizimde çağırabilir: gerekiyorsa arka planda yeniler. */
     public static void refreshIfStale() {
         if (loading) return;

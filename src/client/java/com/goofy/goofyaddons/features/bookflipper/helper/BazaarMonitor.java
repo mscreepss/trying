@@ -21,13 +21,35 @@ public class BazaarMonitor {
     private long lastUpdated;
     private final List<BazaarMonitorItem> monitorItemList = new ArrayList<>();
     private final List<Consumer<Book>> hookList = new ArrayList<>();
+    private final List<Consumer<Book>> sellHookList = new ArrayList<>();
 
+    /**
+     * Izlemeye bir siparis ekler.
+     *
+     * isSellOrder = true olan kayitlar SATIS emirleridir ve o kitabin
+     * sellLevel urununde takip edilirler. Ayni kitap + ayni tip icin eski kayit
+     * varsa temizlenir - yoksa yeniden listeleyince ayni siparis iki kez
+     * izlenirdi.
+     */
     public void add(Book book, double price, boolean isSellOrder) {
+        monitorItemList.removeIf(b -> b.book.equals(book) && b.isSellOrder == isSellOrder);
         monitorItemList.add(new BazaarMonitorItem(book, price, isSellOrder));
     }
 
+    /**
+     * ALIM siparisinin izlemesini birakir.
+     *
+     * DIKKAT: Sadece alim kayitlarini siler. Eskiden kitaba ait TUM kayitlari
+     * siliyordu; kitap satildiktan sonra gelen bayat bir alim uyarisi, o kitabin
+     * SATIS izlemesini de sessizce oldururdu.
+     */
     public void finish(Book book) {
-        monitorItemList.removeIf(b -> b.book.equals(book));
+        monitorItemList.removeIf(b -> b.book.equals(book) && !b.isSellOrder);
+    }
+
+    /** SATIS siparisinin izlemesini birakir (satis doldu / iptal edildi). */
+    public void finishSell(Book book) {
+        monitorItemList.removeIf(b -> b.book.equals(book) && b.isSellOrder);
     }
 
     public void reset() {
@@ -36,6 +58,11 @@ public class BazaarMonitor {
 
     public void hook(Consumer<Book> hook) {
         hookList.add(hook);
+    }
+
+    /** Satis emri outbid yendiginde cagrilir. */
+    public void hookSell(Consumer<Book> hook) {
+        sellHookList.add(hook);
     }
 
 
@@ -93,7 +120,15 @@ public class BazaarMonitor {
 
     private void outbidScanner(JsonObject products, BazaarMonitorItem bazaarMonitorItem) {
         if (!bazaarMonitorItem.shouldCheck()) return;
-        JsonObject productID = products.getAsJsonObject(bazaarMonitorItem.book.getLevel(bazaarMonitorItem.book.level()));
+
+        // ESKI HATA: satis emirleri de ALIM seviyesinin urununde aranıyordu.
+        // Satis emri sellLevel urunundedir; yanlis urune bakildigi icin satis
+        // outbid'i pratikte hic calismiyordu.
+        Book book = bazaarMonitorItem.book;
+        int level = bazaarMonitorItem.isSellOrder ? book.sellLevel() : book.level();
+        JsonObject productID = products.getAsJsonObject(book.getLevel(level));
+        if (productID == null) return;
+
         if (!bazaarMonitorItem.isSellOrder) {
             JsonObject entry = productID.getAsJsonArray("sell_summary").get(0).getAsJsonObject();
             int orders = entry.get("orders").getAsInt();
@@ -117,7 +152,9 @@ public class BazaarMonitor {
     }
 
     private void handleOutbid(BazaarMonitorItem bazaarMonitorItem) {
-        hookList.getFirst().accept(bazaarMonitorItem.book);
+        List<Consumer<Book>> hooks = bazaarMonitorItem.isSellOrder ? sellHookList : hookList;
+        if (hooks.isEmpty()) return;
+        hooks.getFirst().accept(bazaarMonitorItem.book);
     }
 
 

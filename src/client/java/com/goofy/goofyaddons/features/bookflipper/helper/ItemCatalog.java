@@ -102,6 +102,13 @@ public final class ItemCatalog {
             // seviye eklemesini Book.getLevel(i) zaten yapiyor.
             if (!productId.endsWith("_1")) continue;
 
+            // BAZAAR'DA ISLEM GORMEYEN KITAPLARI ELE: urun kayitli olsa bile
+            // ne alis ne satis fiyati varsa o kitap pratikte satilmiyordur ve
+            // arama sonuclarini kirletir.
+            BazaarLookup.Quick quick = BazaarLookup.get(productId);
+            if (quick == null) continue;
+            if (quick.buyPrice() <= 0 && quick.sellPrice() <= 0) continue;
+
             String baseId = productId.substring(0, productId.length() - 2);
             String name = names.get(baseId);
             if (name == null || name.isBlank()) name = prettify(baseId);
@@ -159,6 +166,27 @@ public final class ItemCatalog {
 
         if (result.size() > limit) return new ArrayList<>(result.subList(0, limit));
         return result;
+    }
+
+    /** Tum katalog (Beta tarayicisi bunun uzerinden gezer). */
+    public static List<Entry> all() {
+        return new ArrayList<>(rebuildIfNeeded());
+    }
+
+    /**
+     * Bu kitabin bazaar'daki EN YUKSEK seviyesi.
+     *
+     * Her kitap 5 seviye degil: bazilari 6, bazilari 7 seviyeye kadar gidiyor.
+     * Sabit 5 varsaymak yanlis hedef seviye demek, o da yanlis miktar demek.
+     * 0 donerse urun bulunamamistir.
+     */
+    public static int maxLevel(String baseId) {
+        if (baseId == null || baseId.isBlank()) return 0;
+        int max = 0;
+        for (int level = 1; level <= 10; level++) {
+            if (BazaarLookup.exists(baseId + "_" + level)) max = level;
+        }
+        return max;
     }
 
     public static String displayNameOf(String baseId) {

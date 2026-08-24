@@ -49,7 +49,16 @@ public final class TradeHistory {
     private static final Path PATH =
             FabricLoader.getInstance().getConfigDir().resolve("goofyaddons_history.json");
 
-    /** Kitap bazında toplamlar. */
+    /**
+     * Kitap bazında toplamlar.
+     *
+     * SEVİYE AYRIMI: Aynı isim için level 1 ve level 2 hatları paralel çalışıyor
+     * ve ikisinin de alım claim'i aynı isimle geliyor. Toplamlar birleşik
+     * tutuluyor (doğru olan bu - ikisi de aynı kitabın maliyeti), ama hangi
+     * seviyeye ne kadar harcandığı ayrıca {@code spendByLevel} içinde
+     * saklanıyor; arayüz bunu satır altında gösteriyor. Satış tek seviyeden
+     * (sellLevel) yapıldığı için satış tarafında ayrım yok.
+     */
     public static class Stats {
         public int bought = 0;
         public int sold = 0;
@@ -57,12 +66,27 @@ public final class TradeHistory {
         public double revenueGross = 0;
         public double revenueNet = 0;
 
+        /** level -> o seviyeden yapılan alımın toplam maliyeti. */
+        public Map<Integer, Double> spendByLevel = new LinkedHashMap<>();
+        /** level -> o seviyeden alınan adet. */
+        public Map<Integer, Integer> boughtByLevel = new LinkedHashMap<>();
+
         public double profit() {
             return revenueGross - spend;
         }
 
         public double cleanProfit() {
             return revenueNet - spend;
+        }
+
+        void addBuy(int level, int qty, double worth) {
+            bought += qty;
+            spend += worth;
+            if (level <= 0) return;
+            if (spendByLevel == null) spendByLevel = new LinkedHashMap<>();
+            if (boughtByLevel == null) boughtByLevel = new LinkedHashMap<>();
+            spendByLevel.merge(level, worth, Double::sum);
+            boughtByLevel.merge(level, qty, Integer::sum);
         }
     }
 
@@ -174,10 +198,8 @@ public final class TradeHistory {
             String name = stripRoman(itemName);
             int level = romanLevel(itemName);
 
-            stats(name, false).bought += qty;
-            stats(name, false).spend += worth;
-            stats(name, true).bought += qty;
-            stats(name, true).spend += worth;
+            stats(name, false).addBuy(level, qty, worth);
+            stats(name, true).addBuy(level, qty, worth);
 
             TradeRecord record = active.get(name + "|" + level);
             if (record != null) record.spend += worth;
