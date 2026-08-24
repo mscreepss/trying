@@ -4,6 +4,7 @@ import com.goofy.goofyaddons.GoofyAddons;
 import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.bookflipper.BazaarFlipper;
+import com.goofy.goofyaddons.features.bookflipper.helper.OnlySellMode;
 import com.goofy.goofyaddons.ui.Draw;
 import com.goofy.goofyaddons.ui.HudEditScreen;
 import com.goofy.goofyaddons.ui.Theme;
@@ -51,10 +52,16 @@ public class StateHud {
     private static String stateText() {
         if (!FeatureManager.INSTANCE.isMacroRunning()) return "Stopped";
         if (FeatureManager.INSTANCE.isPaused()) return "Paused";
-        if (FeatureManager.INSTANCE.getCurrentFeature() instanceof BazaarFlipper flipper) {
-            return flipper.getFriendlyState();
-        }
-        return "Idle";
+
+        String base = FeatureManager.INSTANCE.getCurrentFeature() instanceof BazaarFlipper flipper
+                ? flipper.getFriendlyState()
+                : "Idle";
+
+        return switch (OnlySellMode.phase()) {
+            case SELL_ONLY -> base + "  -  sell only";
+            case FINISHING -> base + "  -  finishing";
+            case OFF -> base;
+        };
     }
 
     private static String bookText() {
