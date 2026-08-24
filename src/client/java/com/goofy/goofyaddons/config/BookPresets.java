@@ -23,6 +23,9 @@ import java.util.List;
  *   { "id": "ENCHANTMENT_ULTIMATE_WISE", "name": "Ultimate Wise", "level": 1, "sellLevel": 5 }
  * ]
  *
+ * BOŞ BAŞLAR: Dosya ilk açılışta BOŞ bir liste olarak ([]) oluşturulur. Örnek
+ * ya da varsayılan kitap EKLENMEZ - içine ne koyacağına kullanıcı karar verir.
+ *
  * Arayüzdeki "Yenile" butonu dosyayı oyunu kapatmadan yeniden okur.
  */
 public final class BookPresets {
@@ -68,9 +71,10 @@ public final class BookPresets {
     public static void load() {
         try {
             if (!Files.exists(PATH)) {
-                presets = defaults();
+                // Bos dosya olustur - icine hicbir sey eklemiyoruz.
+                presets = new ArrayList<>();
                 save();
-                status = presets.size() + " ornek olusturuldu";
+                status = "empty - edit presets.json to add books";
                 return;
             }
 
@@ -81,9 +85,10 @@ public final class BookPresets {
             if (loaded == null) loaded = new ArrayList<>();
             loaded.removeIf(preset -> preset == null || !preset.isValid());
             presets = loaded;
-            status = presets.size() + " hazir kitap";
+            status = presets.isEmpty() ? "empty - edit presets.json to add books"
+                    : presets.size() + " saved books";
         } catch (Exception e) {
-            status = "presets.json okunamadi (yazim hatasi?)";
+            status = "presets.json could not be read (syntax error?)";
         }
     }
 
@@ -106,19 +111,21 @@ public final class BookPresets {
         }
     }
 
-    /**
-     * İlk kurulum örnekleri. Bunlar "doğru kitaplar" iddiası değildir - sadece
-     * dosyanın biçimini gösteren başlangıç satırlarıdır, kullanıcı silip kendi
-     * listesini yazar.
-     */
-    private static List<Preset> defaults() {
-        List<Preset> list = new ArrayList<>();
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_WISE", "Ultimate Wise", 1, 5));
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_WISE", "Ultimate Wise", 2, 5));
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_LEGION", "Ultimate Legion", 1, 5));
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_LEGION", "Ultimate Legion", 2, 5));
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_REJUVENATE", "Ultimate Rejuvenate", 1, 5));
-        list.add(new Preset("ENCHANTMENT_ULTIMATE_REJUVENATE", "Ultimate Rejuvenate", 2, 5));
-        return list;
+    /** Aktif kitaplardan hazir sete kaydeder (Presets sayfasindaki dugme). */
+    public static synchronized void addFromBook(com.goofy.goofyaddons.features.bookflipper.helper.Book book) {
+        for (Preset preset : presets) {
+            if (preset.id.equalsIgnoreCase(book.id()) && preset.level == book.level()) return;
+        }
+        presets.add(new Preset(book.id(), book.name(), book.level(), book.sellLevel()));
+        save();
+        status = presets.size() + " saved books";
+    }
+
+    public static synchronized void remove(int index) {
+        if (index < 0 || index >= presets.size()) return;
+        presets.remove(index);
+        save();
+        status = presets.isEmpty() ? "empty - edit presets.json to add books"
+                : presets.size() + " saved books";
     }
 }
