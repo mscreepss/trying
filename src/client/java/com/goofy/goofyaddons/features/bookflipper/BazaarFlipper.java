@@ -169,7 +169,7 @@ public class BazaarFlipper implements Feature {
 
     @Override
     public void start() {
-        ChatUtils.clientMessage("BazaarFlipper: Started");
+        ChatUtils.clientMessage("BazaarFlipper started");
         if (minecraft.screen != null) {
             minecraft.player.closeContainer();
             debug("Container is open, closing");
@@ -182,7 +182,7 @@ public class BazaarFlipper implements Feature {
         recoverFromState = null;
         recoveryCount = 0;
         Humanizer.reset();
-        ActionLog.add(ActionLog.Tag.SYSTEM, "makro baslatildi");
+        ActionLog.add(ActionLog.Tag.SYSTEM, "macro started");
     }
 
     public BazaarFlipper() {
@@ -199,7 +199,7 @@ public class BazaarFlipper implements Feature {
     @Override
     public void stop() {
 
-        ChatUtils.clientMessage("BazaarFlipper: Stopped");
+        ChatUtils.clientMessage("BazaarFlipper stopped");
 
         task.clear();
         enabled = false;
@@ -223,7 +223,7 @@ public class BazaarFlipper implements Feature {
         recoveryCount = 0;
         TradeHistory.clearActive();
         Humanizer.reset();
-        ActionLog.add(ActionLog.Tag.SYSTEM, "makro durduruldu");
+        ActionLog.add(ActionLog.Tag.SYSTEM, "macro stopped");
 
     }
 
@@ -429,8 +429,8 @@ public class BazaarFlipper implements Feature {
                             continue;
                         }
 
-                        ActionLog.add(ActionLog.Tag.ANVIL, book.name() + ": anvile "
-                                + Math.max(0, task.get(book).inInventory) + " adet ile girildi");
+                        ActionLog.add(ActionLog.Tag.ANVIL, book.name() + ": entered anvil with "
+                                + Math.max(0, task.get(book).inInventory) + " books");
                         editStateBook(book, BookState.COMBINE);
                     }
                     if (shouldCheck) {
@@ -498,7 +498,7 @@ public class BazaarFlipper implements Feature {
                     debug("confirming buy order for " + activeBook);
                     click(13, false);
                     ActionLog.add(ActionLog.Tag.BUY, activeBook.getRomanLevel(activeBook.level())
-                            + " x" + lastOrderAmount + " buy order acildi");
+                            + " x" + lastOrderAmount + " buy order placed");
                     if (shouldStore(activeBook)) {
                         editStateBook(activeBook, BookState.STORE);
                         state = State.IDLE;
@@ -562,8 +562,8 @@ public class BazaarFlipper implements Feature {
 
                         int remainingOrder = Math.max(0, task.get(bookToHandle).getAmountToOrder());
                         ActionLog.add(ActionLog.Tag.OUTBID, bookToHandle.getRomanLevel(bookToHandle.level())
-                                + ": " + outbidClaimedAmount + " adet claim edildi, "
-                                + (remainingOrder == 0 ? "hat tamamlandi" : remainingOrder + " adet yeniden aciliyor"));
+                                + ": " + outbidClaimedAmount + " claimed, "
+                                + (remainingOrder == 0 ? "line complete" : remainingOrder + " being re-ordered"));
                         outbidClaimedAmount = 0;
 
                         editStateBook(bookToHandle, task.get(bookToHandle).isCompleted() ? BookState.ANVIL : BookState.SELECTED);
@@ -680,8 +680,8 @@ public class BazaarFlipper implements Feature {
                     // Kendi payımız bitti (ya da envanterde bu kitaptan kalmadı).
                     if (storedThisVisit > 0) {
                         ActionLog.add(ActionLog.Tag.STORE, bookToHandle.getRomanLevel(bookToHandle.level())
-                                + ": " + storedThisVisit + " adet depoya koyuldu, "
-                                + Math.max(0, storeTask.getAmountToOrder()) + " adet hala buy order'da");
+                                + ": " + storedThisVisit + " moved to storage, "
+                                + Math.max(0, storeTask.getAmountToOrder()) + " still on buy order");
                         storedThisVisit = 0;
                     }
 
@@ -794,8 +794,8 @@ public class BazaarFlipper implements Feature {
                         currentTask.clearEnderChest();
                     }
 
-                    ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name() + ": anvile "
-                            + Math.max(0, currentTask.inInventory) + " adet ile girildi");
+                    ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name() + ": entered anvil with "
+                            + Math.max(0, currentTask.inInventory) + " books");
                     editStateBook(bookToHandle, BookState.COMBINE);
                 }
             }
@@ -852,7 +852,7 @@ public class BazaarFlipper implements Feature {
                             ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik kaldi, gorev birakiliyor. Kalan ara seviye kitaplar makro yeniden baslatildiginda siparis miktarindan dusulecek.");
                             debug("dead end for " + bookToHandle.name() + " - physical shortage, dropping task");
                             ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
-                                    + ": havuz eksik kaldi, gorev birakildi");
+                                    + ": not enough books left, line dropped");
                             TradeHistory.abandon(bookToHandle);
                             task.remove(bookToHandle);
                         }
@@ -981,8 +981,8 @@ public class BazaarFlipper implements Feature {
 
                     int listedAmount = inventoryScanner.locate(soldBook.getRomanLevel(soldBook.sellLevel())).size();
                     ActionLog.add(ActionLog.Tag.SELL, soldBook.getRomanLevel(soldBook.sellLevel())
-                            + ": " + (sellOrderCancelled ? "acik sell order iptal edildi, " : "")
-                            + "toplam " + Math.max(1, listedAmount) + " adet satisa cikarildi");
+                            + ": " + (sellOrderCancelled ? "open sell order cancelled, " : "")
+                            + "listed " + Math.max(1, listedAmount) + " in total");
                     sellOrderCancelled = false;
 
                     // SURE OLCUMU BURADA BITER: ilk buy order -> sell order acilisi.
@@ -1114,7 +1114,7 @@ public class BazaarFlipper implements Feature {
                     storedThisVisit = 0;
                     sellOrderCancelled = false;
                     Humanizer.reset();
-                    ActionLog.add(ActionLog.Tag.RECOVERY, "toparlandi, akis bastan dagitiliyor");
+                    ActionLog.add(ActionLog.Tag.RECOVERY, "recovered - restarting the flow");
                     state = State.START;
                 }
             }
@@ -1127,6 +1127,62 @@ public class BazaarFlipper implements Feature {
 
     public String getActiveBookName() {
         return activeBook != null ? activeBook.getRomanLevel(activeBook.level()) : "-";
+    }
+
+    /**
+     * HUD'un cizdigi tek satirlik gorev bilgisi.
+     *
+     * onOrder = hala bazaar'da bekleyen adet, owned = elde + depoda + ara seviye
+     * kredisi, target = o hattin toplam hedefi (2'nin kuvveti).
+     */
+    public record TaskInfo(String name, int level, int sellLevel, String phase,
+                           int onOrder, int owned, int target) {
+    }
+
+    /** Kod adlarini degil, oyuncunun bildigi terimleri dondurur. */
+    public List<TaskInfo> getTaskInfo() {
+        List<TaskInfo> lines = new ArrayList<>();
+        for (Map.Entry<Book, Task> entry : task.entrySet()) {
+            Book book = entry.getKey();
+            Task t = entry.getValue();
+
+            int target = book.getQtyAmount(book.level());
+            int owned = Math.max(0, t.inEnderChest + t.inInventory + t.unitCredit);
+            int onOrder = Math.max(0, t.getAmountToOrder());
+
+            lines.add(new TaskInfo(book.name(), book.level(), book.sellLevel(),
+                    phaseName(t.getBookState()), onOrder, Math.min(owned, target), target));
+        }
+        return lines;
+    }
+
+    private static String phaseName(BookState state) {
+        return switch (state) {
+            case SELECTED -> "queued";
+            case BUY_ORDER -> "buy order";
+            case OUTBID -> "outbid";
+            case STORE -> "storing";
+            case ANVIL -> "fetching";
+            case COMBINE -> "combining";
+            case SELL -> "selling";
+        };
+    }
+
+    /** Ana state'in oyuncu tarafindan anlasilir adi (State HUD burayi okur). */
+    public String getFriendlyState() {
+        return switch (state) {
+            case START, FETCHING -> "Scanning prices";
+            case STARTUP_CHECK -> "Checking storage";
+            case IDLE -> "Idle";
+            case BAZAAR_NAVIGATION -> "Buying";
+            case OUTBID -> "Outbid";
+            case STORE -> "Storing";
+            case ANVIL -> "Fetching";
+            case COMBINE -> "Anvil";
+            case SELL -> "Selling";
+            case REPLACE_SELL -> "Relisting";
+            case RECOVERY -> "Recovering";
+        };
     }
 
     public List<String> getTaskSummary() {
@@ -1418,7 +1474,7 @@ public class BazaarFlipper implements Feature {
             task.put(book, newTask);
             TradeHistory.begin(book);
             ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level())
-                    + " hatti acildi - hedef " + amount + " adet");
+                    + " line opened - target " + amount);
 
             if (credit > 0) {
                 ChatUtils.clientMessage(book.name() + " icin elde " + credit + " birim ara seviye kitap var, siparis " + fullAmount + " yerine " + amount + " adet aciliyor.");
@@ -1591,7 +1647,7 @@ public class BazaarFlipper implements Feature {
         }
         debug("Found outbid:" + book.getRomanLevel(book.level()));
         TradeHistory.outbid(book);
-        ActionLog.add(ActionLog.Tag.OUTBID, book.getRomanLevel(book.level()) + " outbid yendi");
+        ActionLog.add(ActionLog.Tag.OUTBID, book.getRomanLevel(book.level()) + " was outbid");
         editStateBook(book, BookState.OUTBID);
     }
 
@@ -1610,7 +1666,7 @@ public class BazaarFlipper implements Feature {
 
         for (Book book : booksInState) {
             if (!stripped.equals(book.getRomanLevel(book.level()))) continue;
-            ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level()) + " siparisi doldu");
+            ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level()) + " buy order filled");
             editStateBook(book, BookState.OUTBID);
             bazaarMonitor.finish(book);
         }
@@ -1691,21 +1747,21 @@ public class BazaarFlipper implements Feature {
         }
 
         String reason = stateStuck
-                ? state + " durumunda " + (limit / 1000) + " sn ilerleme olmadi"
-                : "10 dakikadir ortada hic gorev yok, fiyatlar yeniden cekiliyor";
+                ? "no progress in " + state + " for " + (limit / 1000) + "s"
+                : "no tasks at all for 10 minutes - refreshing prices";
 
         if (recoveryCount >= MAX_RECOVERY_ATTEMPTS) {
-            ActionLog.add(ActionLog.Tag.RECOVERY, "ayni yerde " + MAX_RECOVERY_ATTEMPTS
-                    + " kez takilindi - makro durduruluyor: " + reason);
-            ChatUtils.clientMessage("Ayni yerde " + MAX_RECOVERY_ATTEMPTS
-                    + " kez takilindi (" + reason + "). Makro guvenlik icin durduruluyor.");
+            ActionLog.add(ActionLog.Tag.RECOVERY, "stuck " + MAX_RECOVERY_ATTEMPTS
+                    + " times in the same place - stopping the macro: " + reason);
+            ChatUtils.clientMessage("Stuck " + MAX_RECOVERY_ATTEMPTS
+                    + " times in the same place (" + reason + "). Stopping the macro to be safe.");
             FeatureManager.INSTANCE.stop();
             return;
         }
 
-        ActionLog.add(ActionLog.Tag.RECOVERY, reason + " - toparlaniyor ("
+        ActionLog.add(ActionLog.Tag.RECOVERY, reason + " - recovering ("
                 + recoveryCount + "/" + MAX_RECOVERY_ATTEMPTS + ")");
-        ChatUtils.clientMessage("Takilma tespit edildi: " + reason + ". Toparlaniyor...");
+        ChatUtils.clientMessage("Stall detected: " + reason + ". Recovering...");
 
         state = State.RECOVERY;
         stateEnteredMs = now;
