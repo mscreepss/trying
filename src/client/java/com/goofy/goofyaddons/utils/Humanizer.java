@@ -104,7 +104,7 @@ public final class Humanizer {
         int pause = gaussian(BREAK_LENGTH_MIN_MS, BREAK_LENGTH_MAX_MS);
         restUntilMs = now + pause;
         ActionLog.add(ActionLog.Tag.SYSTEM,
-                "mikro mola: " + String.format("%.1f", pause / 1000.0) + " sn");
+                "micro break: " + String.format("%.1f", pause / 1000.0) + "s");
     }
 
     /**
