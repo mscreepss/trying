@@ -57,10 +57,23 @@ public class GoofyConfig {
     public long totalUptimeMs = 0;
 
     // --- HUD ---
-    /** HUD'un sol üst köşesinin ekran koordinatı (Move HUD ekranından sürüklenerek ayarlanır). */
+    // Uc ayri HUD var; her birinin kendi konumu ve acik/kapali durumu.
+    // Eski alan adlari (hudX/hudY/hudVisible) Profit HUD'a ait - eski config
+    // dosyalarindaki konum bilgisi bozulmasin diye ismi degistirilmedi.
+    /** Profit HUD sol ust kosesi. */
     public int hudX = 8;
     public int hudY = 8;
     public boolean hudVisible = true;
+
+    /** Task HUD (eski overlay) sol ust kosesi. */
+    public int taskHudX = 8;
+    public int taskHudY = 96;
+    public boolean taskHudVisible = true;
+
+    /** State HUD sol ust kosesi. */
+    public int stateHudX = 8;
+    public int stateHudY = 180;
+    public boolean stateHudVisible = true;
 
     // --- Tuş atamaları ---
     public Keys keys = new Keys();
