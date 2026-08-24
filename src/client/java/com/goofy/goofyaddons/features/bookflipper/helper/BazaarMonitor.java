@@ -10,6 +10,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 
@@ -19,7 +20,14 @@ public class BazaarMonitor {
     private long duration = 15000;
     private long startMs;
     private long lastUpdated;
-    private final List<BazaarMonitorItem> monitorItemList = new ArrayList<>();
+    /**
+     * THREAD-SAFE OLMALI: HTTP thread'i refresh() icinde gezip removeIf yaparken
+     * tick thread'i add() / finish() / finishSell() cagiriyor. Duz ArrayList ile
+     * bu ConcurrentModificationException (ya da toArray sirasinda null kuyruk ->
+     * NPE) demekti; istisna thenAccept icinde sessizce yutuldugu icin o turdaki
+     * geri kalan siparisler hic taranmiyordu.
+     */
+    private final List<BazaarMonitorItem> monitorItemList = new CopyOnWriteArrayList<>();
     private final List<Consumer<Book>> hookList = new ArrayList<>();
     private final List<Consumer<Book>> sellHookList = new ArrayList<>();
 
@@ -108,7 +116,16 @@ public class BazaarMonitor {
 
                     JsonObject products = root.getAsJsonObject("products");
 
-                    monitorItemList.forEach(bazaarMonitorItem -> outbidScanner(products, bazaarMonitorItem));
+                    // KOPYA UZERINDE GEZ. outbidScanner -> handleOutbid -> hook
+                    // zinciri finish() / finishSell() cagirabiliyor, o da
+                    // monitorItemList.removeIf yapiyor. Ayni listeyi forEach ile
+                    // gezerken bu ConcurrentModificationException atardi; istisna
+                    // thenAccept icinde sessizce yutuldugu icin geri kalan
+                    // siparisler o turda hic taranmiyor, asagidaki temizlik de
+                    // hic calismiyordu. SATIS outbid'inde bu HER SEFERINDE
+                    // oluyordu - handleSellOutbid her cagrisinda finishSell yapar.
+                    new ArrayList<>(monitorItemList)
+                            .forEach(bazaarMonitorItem -> outbidScanner(products, bazaarMonitorItem));
 
                     monitorItemList.removeIf(bazaarMonitorItem -> {
                         if (bazaarMonitorItem.getOutbid()) return true;

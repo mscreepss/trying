@@ -65,6 +65,12 @@ public class BazaarFlipper implements Feature {
         COMBINE,
         SELL,
         REPLACE_SELL,
+        /**
+         * Acilista bazaar'daki ACIK SATIS EMIRLERINI okuyup izlemeye alir.
+         * BazaarMonitor yalnizca makronun kendi actigi emirleri biliyordu;
+         * oyun kapanip acilinca o kayit gidiyor ve outbid hic yakalanmiyordu.
+         */
+        SELL_SCAN,
         /** Takilma tespit edildiginde girilen toparlanma durumu. */
         RECOVERY
     }
@@ -144,7 +150,30 @@ public class BazaarFlipper implements Feature {
     /** Satisa cikarilirken okunan birim fiyat - izlemeye bu fiyatla kaydediliyor. */
     private double pendingSellPrice = 0;
     /** Satis emri outbid yendi mi? IDLE bunu gorunce REPLACE_SELL'e gecer. */
-    private boolean sellOutbidPending = false;
+
+    /** Only Sell: bu baslatmada eldeki stok icin gorevler kuruldu mu? */
+    private boolean onlySellSeeded = false;
+    /** Only Sell: acik satis emirleri bu baslatmada okundu mu? */
+    private boolean sellScanDone = false;
+    /** SELL_SCAN kac kez denendi? 3'ten sonra pes edilir, sonsuz dongu olmasin. */
+    private int sellScanAttempts = 0;
+    /** SELL_SCAN icinde slot 50'ye kac kez tiklandi? */
+    private int sellScanClicks = 0;
+
+    /**
+     * Outbid yenmis SATIS emirlerinin adlari, geldikleri sirayla.
+     *
+     * NEDEN LISTE: tek bir boolean bayrakti. Ayni anda iki emir outbid yerse
+     * ikincisi sessizce kayboluyordu. Ayrica REPLACE_SELL hangi emri
+     * duzeltecegini bilemedigi icin listedeki ILK emri iptal ediyordu - saglikli
+     * emir bosuna churn ediliyor, outbid yenen hic duzelmiyordu.
+     *
+     * THREAD: BazaarMonitor'un HTTP thread'i yaziyor, tick thread'i okuyor.
+     */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> pendingSellOutbids =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    /** REPLACE_SELL'in su an duzeltmesi gereken satis emrinin adi. */
+    private String outbidSellName = null;
     private int outbidClaimedAmount = 0;
     private int storedThisVisit = 0;
     private boolean sellOrderCancelled = false;
@@ -180,6 +209,12 @@ public class BazaarFlipper implements Feature {
             debug("Container is open, closing");
         }
         firstStartUp = true;
+        onlySellSeeded = false;
+        sellScanDone = false;
+        sellScanAttempts = 0;
+        sellScanClicks = 0;
+        pendingSellOutbids.clear();
+        outbidSellName = null;
         enabled = true;
         state = State.START;
         stateEnteredMs = System.currentTimeMillis();
@@ -228,7 +263,12 @@ public class BazaarFlipper implements Feature {
         recoverFromState = null;
         recoveryCount = 0;
         TradeHistory.clearActive();
-        sellOutbidPending = false;
+        onlySellSeeded = false;
+        sellScanDone = false;
+        sellScanAttempts = 0;
+        sellScanClicks = 0;
+        pendingSellOutbids.clear();
+        outbidSellName = null;
         pendingSellPrice = 0;
         OnlySellMode.setPhase(OnlySellMode.Phase.OFF);
         Humanizer.reset();
@@ -328,6 +368,14 @@ public class BazaarFlipper implements Feature {
                         }
 
 
+                        // ONLY SELL: siparis miktari 0 oldugu icin her gorev daha
+                        // ILK sayfada "tamamlandi" gorunur. Burada ANVIL'e yollarsak
+                        // bu kitap SELECTED olmaktan cikar ve IKINCI sayfa onun icin
+                        // hic taranmaz - depoda 2. sayfada duran kitaplar gorunmez
+                        // olurdu. Yonlendirme iki sayfa da bitince, tek seferde
+                        // finishOnlySellStartup() icinde yapilir.
+                        if (OnlySellMode.isEnabled()) continue;
+
                         if (task.get(book).isCompleted()) {
                             editStateBook(book, BookState.ANVIL);
                             continue;
@@ -342,7 +390,11 @@ public class BazaarFlipper implements Feature {
                     if (secondPageCheck) {
                         debug("BazaarFlipper: [STARTUP_CHECK] Switching to IDLE, firstStartup = false");
                         firstStartUp = false;
-                        state = State.IDLE;
+                        finishOnlySellStartup();
+                        // Only Sell'de once acik satis emirlerini okuyup izlemeye
+                        // aliriz; yoksa onceki oturumdan kalan emirlerin outbid'i
+                        // hic yakalanmaz.
+                        state = needsSellScan() ? State.SELL_SCAN : State.IDLE;
                         minecraft.player.closeContainer();
                         return;
                     }
@@ -379,10 +431,37 @@ public class BazaarFlipper implements Feature {
                 // ONLY SELL: alim tarafi tamamen bittiyse ve satis emrimiz
                 // outbid yendiyse, acik satislari guncel fiyattan yeniden
                 // listelemek icin REPLACE_SELL'e gec.
-                if (sellOutbidPending && OnlySellMode.sellOutbidActive()) {
-                    sellOutbidPending = false;
+                // Acilis taramasi yarim kaldiysa (RECOVERY, ekran acilmadi, sunucu
+                // gecikti) burada tekrar denenir. Uc denemeden sonra pes edilir -
+                // aksi halde SELL_SCAN -> zaman asimi -> RECOVERY -> IDLE -> SELL_SCAN
+                // sonsuz donerdi. Ayrica makro calisirken Only Sell'i sonradan
+                // acan kullanici da taramayi bu yoldan alir.
+                if (needsSellScan()) {
+                    if (sellScanAttempts >= 3) {
+                        sellScanDone = true;
+                        ActionLog.add(ActionLog.Tag.SELL, "could not read the open sell orders - giving up");
+                    } else {
+                        sellScanAttempts++;
+                        sellScanClicks = 0;
+                        // Bu yeniden deneme BILINCLI bir karar, "takildi" degil.
+                        // Sayaci sifirlamazsak ucuncu denemeden once watchdog
+                        // recoveryCount'u 3'e tasiyip makroyu tamamen durdurur ve
+                        // asagidaki "pes et" dali hic calismaz.
+                        recoveryCount = 0;
+                        state = State.SELL_SCAN;
+                        return;
+                    }
+                }
+
+                // TEK DOGRU KAYNAK KUYRUK. Eskiden ayrica bir boolean bayrak
+                // vardi ve "bayrak = kuyruk bos mu" atamasi tick thread'inde,
+                // add() ise HTTP thread'inde calisiyordu: tam arada gelen bir
+                // outbid bayragi sifirlatip kuyrukta unutuluyordu.
+                if (!pendingSellOutbids.isEmpty() && OnlySellMode.sellOutbidActive()) {
+                    outbidSellName = pendingSellOutbids.poll();
                     sellOrderName.clear();
-                    ActionLog.add(ActionLog.Tag.SELL, "sell order was outbid - relisting at the current price");
+                    ActionLog.add(ActionLog.Tag.SELL, (outbidSellName == null ? "a sell order" : outbidSellName)
+                            + " was outbid - relisting at the current price");
                     ChatUtils.clientMessage("Sell order was outbid - relisting.");
                     state = State.REPLACE_SELL;
                     return;
@@ -466,6 +545,19 @@ public class BazaarFlipper implements Feature {
             }
 
             case FETCHING -> {
+
+                // ONLY SELL: gorev kurulumu FIYAT VERISINE BAGLI OLMAMALI.
+                // flipItemsList yalnizca KARLI hatlari icerir. Hicbir kitap su an
+                // karli degilse - ki Only Sell'i tam da o zaman aciyorsun - liste
+                // sonsuza kadar bos kalir, processData hic calismaz, gorevler hic
+                // kurulmaz ve 60 sn sonra FETCHING zaman asimina ugrar. Uc kez
+                // ust uste olunca watchdog makroyu tamamen durdurur.
+                // Only Sell'de bu durakta yapacak bir sey yok: tohumla ve gec.
+                if (OnlySellMode.blocksNewOrders()) {
+                    if (firstStartUp) seedOnlySellTasks();
+                    state = State.IDLE;
+                    return;
+                }
 
                 if (!flipItemsList.isEmpty()) {
                     processData();
@@ -758,10 +850,34 @@ public class BazaarFlipper implements Feature {
                     int booksToPull = Math.min(slots.size(), Math.max(0, currentTask.inEnderChest));
 
                     if (booksToPull > inventoryScanner.getEmptyInventorySlots()) {
+                        // ONLY SELL SONSUZ DONGU EMNIYETI.
+                        //
+                        // Normalde envanter dolduysa STORE fazi yer acar. Only
+                        // Sell'de STORE fazi YOK, yani hicbir sey yer acmaz ve su
+                        // tur sonsuza kadar doner:
+                        //   ANVIL -> COMBINE (yapacak is yok) -> SELL (liste bos)
+                        //   -> FETCHING -> IDLE -> ANVIL ...
+                        // Her turda bir /ec komutu gider. Watchdog bunu goremez
+                        // cunku state HER TICK degisiyor, stateEnteredMs surekli
+                        // sifirlaniyor. Uc denemeden sonra bu hat birakilir.
+                        if (OnlySellMode.isEnabled()) {
+                            currentTask.anvilFullBounces++;
+                            if (currentTask.anvilFullBounces >= 3) {
+                                ChatUtils.clientMessage(bookToHandle.name()
+                                        + ": envanter dolu, bu hat birakildi. Yer acip makroyu yeniden baslat.");
+                                ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name()
+                                        + ": inventory full, line dropped - free some slots and restart");
+                                task.remove(bookToHandle);
+                                state = State.IDLE;
+                                minecraft.player.closeContainer();
+                                return;
+                            }
+                        }
                         state = State.COMBINE;
                         minecraft.player.closeContainer();
                         return;
                     }
+                    currentTask.anvilFullBounces = 0;
 
                     debug("found " + slots.size() + " book slots in ender chest, kendi payimiz: " + booksToPull);
 
@@ -815,6 +931,11 @@ public class BazaarFlipper implements Feature {
                         debug("sayac ec=" + currentTask.inEnderChest + " diyor ama iki sayfada da yok, sayac gercege gore sifirlaniyor");
                         currentTask.clearEnderChest();
                     }
+                    // Ara seviye artik bayragi da burada duser: iki sayfa da
+                    // tarandi, depoda alinacak bir sey kalmadi. Dusmezse
+                    // shouldCheckEnderChest() surekli true doner ve gorev
+                    // ANVIL <-> COMBINE arasinda gidip gelir.
+                    currentTask.storageLeftover = false;
 
                     ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name() + ": entered anvil with "
                             + Math.max(0, currentTask.inInventory) + " books");
@@ -1025,6 +1146,39 @@ public class BazaarFlipper implements Feature {
                     }
 
                     Task soldTask = task.get(soldBook);
+
+                    // ONLY SELL HATTI BURADA KAPANIR - asagidaki dala GIRMEZ.
+                    //
+                    // NEDEN: Only Sell gorevlerinde amountToOrder = 0, yani
+                    // getAmountToOrder() = 0 - (depo + envanter) neredeyse her zaman
+                    // negatiftir ve bu dal calisir. Icerideki addInInventory(-qty)
+                    // TAM havuz kadar dusuyor; ama havuzun bir kismi unitCredit
+                    // olarak sayilmissa (depodaki ara seviye kitaplar) sayac EKSIYE
+                    // duser. O zaman getAmountToOrder() ARTIYA doner, isCompleted()
+                    // false olur ve IDLE gorevi BAZAAR_NAVIGATION'a yollar:
+                    // "hicbir sey satin alma" modu gercek parayla alim yapar.
+                    //
+                    // Depoda hala stok kaldiysa kaybolmaz; makroyu yeniden
+                    // baslatinca STARTUP_CHECK onu bulur ve yeni bir tur baslar.
+                    if (soldTask != null && OnlySellMode.isEnabled()) {
+                        ActionLog.add(ActionLog.Tag.SELL, soldBook.name() + ": only sell line finished");
+
+                        // AYNI ISIMDEKI TUM SELL GOREVLERI birlikte kapanir.
+                        // removeDuplicateBooks'a guvenemeyiz: o metot
+                        // getAmountToOrder() < 0 olan gorevleri saymiyor, Only
+                        // Sell gorevlerinde ise amountToOrder 0 oldugu icin stok
+                        // tutan her gorev zaten < 0'dir - yani hicbiri sayilmaz ve
+                        // hicbiri silinmez. Kardes hat (or. 2to5) SELL'de asili
+                        // kalir, elinde kitap yokken kendi satis emrini iptal edip
+                        // yeniden acar ya da "havuz eksik kaldi" diye dusulur.
+                        for (Book sameName : booksInState(BookState.SELL)) {
+                            if (!sameName.name().equals(soldBook.name())) continue;
+                            task.remove(sameName);
+                        }
+                        task.remove(soldBook);
+                        return;
+                    }
+
                     if (soldTask != null && soldTask.getAmountToOrder() < 0) {
                         soldTask.addInInventory(-soldBook.getQtyAmount(soldBook.level()));
                         editStateBook(soldBook, BookState.SELECTED);
@@ -1040,6 +1194,53 @@ public class BazaarFlipper implements Feature {
                     task.remove(soldBook);
                     bookList.removeFirst();
 
+                }
+            }
+
+            /*
+             * Acilista BIR KEZ calisir: bazaar > Manage Orders ekranini acar,
+             * oradaki SELL satirlarini okur ve her birini BazaarMonitor'e satis
+             * emri olarak kaydeder. REPLACE_SELL ile birebir ayni navigasyon
+             * (tomato bazaar -> slot 50), fark su ki burada hicbir sey iptal
+             * edilmez; sadece okuma yapilir.
+             */
+            case SELL_SCAN -> {
+                if (!isContainerOpen()) clock.start(randomizer());
+                if (!isContainerOpen() && clock.shouldFire()) {
+                    debug("[SELL_SCAN] opening bazaar to read open sell orders");
+                    openBazaar("tomato");
+                }
+
+                if (containerCheck("tomato")) clock.start(randomizer());
+                if (containerCheck("tomato") && clock.shouldFire()) {
+                    // SONSUZ DONGU EMNIYETI: click() her cagrisinda stateEnteredMs'i
+                    // sifirliyor, yani watchdog bu ikili tekrar ettikce ASLA
+                    // tetiklenmez. Slot 50 herhangi bir sebeple "Manage Orders"
+                    // acmiyorsa (arayuz degisti, ekran gecikti) makro burada
+                    // sonsuza kadar tiklardi. Bes denemede acilmadiysa vazgecilir.
+                    if (sellScanClicks >= 5) {
+                        debug("[SELL_SCAN] siparis ekrani acilmadi, tarama birakiliyor");
+                        ActionLog.add(ActionLog.Tag.SELL, "could not open the order screen - sell orders not watched");
+                        sellScanDone = true;
+                        state = State.IDLE;
+                        minecraft.player.closeContainer();
+                        return;
+                    }
+                    sellScanClicks++;
+                    debug("[SELL_SCAN] tomato bazaar open, clicking slot 50");
+                    click(50, false);
+                }
+
+                // "!tomato" emniyeti: containerCheck ICERIYOR bakiyor. Urun ekrani
+                // da "Bazaar" kelimesini tasisaydi bu blok daha siparis ekrani
+                // acilmadan calisir, hicbir emir bulamaz ve taramayi "bitti"
+                // sayardi. Iki kosul birden aranınca o ihtimal kapaniyor.
+                if (containerCheck("Bazaar") && !containerCheck("tomato")) clock.start(randomizer());
+                if (containerCheck("Bazaar") && !containerCheck("tomato") && clock.shouldFire()) {
+                    registerOpenSellOrders();
+                    sellScanDone = true;
+                    state = State.IDLE;
+                    minecraft.player.closeContainer();
                 }
             }
 
@@ -1072,15 +1273,39 @@ public class BazaarFlipper implements Feature {
                             return;
                         }
 
+                        // Bayat hedef kalmasin: temizlenmezse notEnoughCash
+                        // yolundan girilen bir sonraki REPLACE_SELL yanlis emri
+                        // hedef alir.
+                        outbidSellName = null;
                         state = State.FETCHING;
                         minecraft.player.closeContainer();
                         return;
 
                     }
 
-                    sellOrderName.add(inventoryScanner.getName(slots.getFirst()).replace("SELL ", ""));
+                    // OUTBID YENEN emri sec, listedeki ilkini degil.
+                    //
+                    // ESKI DAVRANIS: her zaman slots.getFirst(). Birden fazla acik
+                    // satis emri varsa saglikli olan iptal edilip yeniden aciliyor,
+                    // outbid yenen ise hic duzelmiyordu. Ustelik getSellOrder() adinda
+                    // "SELL" gecen HER urunu dondurdugu icin config'te olmayan alakasiz
+                    // bir emir de iptal edilebiliyordu.
+                    // endsWith, contains DEGIL: "SELL 16x Ultimate Wise VI" adi
+                    // "Ultimate Wise V" ile eslesir ve outbid yenmemis baska bir
+                    // emri (hatta elle acilmis alakasiz bir emri) iptal ederdik.
+                    int chosen = slots.getFirst();
+                    if (outbidSellName != null) {
+                        for (int slot : slots) {
+                            String name = inventoryScanner.getName(slot).replace("SELL ", "").trim();
+                            if (!name.endsWith(outbidSellName)) continue;
+                            chosen = slot;
+                            break;
+                        }
+                    }
 
-                    click(slots.getFirst(), false);
+                    sellOrderName.add(inventoryScanner.getName(chosen).replace("SELL ", ""));
+
+                    click(chosen, false);
 
                 }
 
@@ -1120,6 +1345,7 @@ public class BazaarFlipper implements Feature {
 
                     ActionLog.add(ActionLog.Tag.SELL, sellOrderName.getFirst() + " relisted at the current price");
                     sellOrderName.clear();
+                    outbidSellName = null;
                     state = State.FETCHING;
 
                 }
@@ -1155,6 +1381,21 @@ public class BazaarFlipper implements Feature {
                     outbidClaimedAmount = 0;
                     storedThisVisit = 0;
                     sellOrderCancelled = false;
+
+                    // ACILIS ORTASINDA TOPARLANDIYSAK Only Sell gorevlerini
+                    // atariz. RECOVERY secondPageCheck'i sifirliyor, yani
+                    // STARTUP_CHECK 1. sayfayi bastan tarayacak. Only Sell'de
+                    // gorevler iki sayfa boyunca SELECTED kaldigi icin ayni
+                    // kitaplar IKINCI kez sayilir: inEnderChest ve unitCredit
+                    // ikiye katlanir. inEnderChest ANVIL'de kendini duzeltiyor
+                    // ama unitCredit duzelmiyor - eli bos bir gorev "stok var"
+                    // gorunup cekici bosuna acardi. Temiz sayfadan baslamak
+                    // bedava: FETCHING yeniden tohumlar.
+                    if (firstStartUp && OnlySellMode.isEnabled()) {
+                        task.clear();
+                        onlySellSeeded = false;
+                    }
+
                     Humanizer.reset();
                     ActionLog.add(ActionLog.Tag.RECOVERY, "recovered - restarting the flow");
                     state = State.START;
@@ -1222,6 +1463,7 @@ public class BazaarFlipper implements Feature {
             case ANVIL -> "Fetching";
             case COMBINE -> "Anvil";
             case SELL -> "Selling";
+            case SELL_SCAN -> "Reading sells";
             case REPLACE_SELL -> "Relisting";
             case RECOVERY -> "Recovering";
         };
@@ -1381,6 +1623,11 @@ public class BazaarFlipper implements Feature {
         Set<Integer> levels = new HashSet<>();
         for (Book b : GoofyConfig.INSTANCE.books) {
             if (!b.name().equals(name)) continue;
+            // Kapatilmis hat "yapilandirilmis" degildir. Sayilsaydi o seviye
+            // leftoverLevels'tan dislanir ama onu sahiplenen bir gorev de
+            // olmazdi: depodaki o kitaplar hicbir zaman goruilmez, hicbir zaman
+            // cekilmez, sonsuza kadar depoda kalirdi.
+            if (!GoofyConfig.isBookEnabled(b)) continue;
             levels.add(b.level());
         }
         return levels;
@@ -1390,6 +1637,11 @@ public class BazaarFlipper implements Feature {
     private boolean isLowestConfiguredLevel(Book book) {
         for (Book b : GoofyConfig.INSTANCE.books) {
             if (!b.name().equals(book.name())) continue;
+            // KAPATILMIS hat "yapilandirilmis" sayilmaz. Sayilsaydi: level 1
+            // kapali + level 2 acikken hicbir gorev "en dusuk seviye" olmaz,
+            // ara seviye artiklar hic kredilenmez ve Only Sell'de o gorev
+            // "elin bos" diye silinir - depodaki kitaplar orada kalirdi.
+            if (!GoofyConfig.isBookEnabled(b)) continue;
             if (b.level() < book.level()) return false;
         }
         return true;
@@ -1451,8 +1703,134 @@ public class BazaarFlipper implements Feature {
             if (units == 0) continue;
 
             t.addUnitCredit(units);
+            // Bu kitaplar DEPODA duruyor: ANVIL'in ugrayip onlari cekmesi gerek.
+            t.storageLeftover = true;
             debug(book.name() + " icin depoda " + units + " birimlik ara seviye kitap bulundu, siparis miktarindan dusuldu");
         }
+    }
+
+    /**
+     * ONLY SELL açıkken başlatıldığında, config'teki her hat için SİPARİŞ
+     * MİKTARI 0 olan bir görev açar.
+     *
+     * NEDEN 0: getAmountToOrder() = 0 - (depodaki + envanterdeki), yani her
+     * zaman <= 0, yani isCompleted() her zaman true. IDLE bu görevleri SELECTED
+     * dalında görür görmez ANVIL'e yollar - BAZAAR_NAVIGATION'a, yani yeni
+     * sipariş açmaya, hiçbir koşulda giremezler. "Alma, sadece elindekini bitir"
+     * kuralı böylece görev seviyesinde garanti altına alınır.
+     *
+     * Depoda ne olduğunu henüz bilmediğimiz için HER hat için görev açılır;
+     * eli boş çıkanlar STARTUP_CHECK bitince finishOnlySellStartup() ile silinir.
+     */
+    private void seedOnlySellTasks() {
+        if (onlySellSeeded || GoofyConfig.INSTANCE == null) return;
+        onlySellSeeded = true;
+
+        for (Book book : GoofyConfig.INSTANCE.books) {
+            if (!GoofyConfig.isBookEnabled(book)) continue;
+            if (task.containsKey(book)) continue;
+
+            Task fresh = new Task(0);
+
+            // Envanterde duran ARA SEVIYE kitaplari birim olarak yaz. Depodakiler
+            // STARTUP_CHECK icinde creditLeftoverUnitsFromContainer ile eklenir;
+            // orada bilerek sadece konteyner taraniyor, cift sayim olmasin diye.
+            if (isLowestConfiguredLevel(book)) {
+                int leftover = leftoverUnitsInInventory(book);
+                if (leftover > 0) {
+                    fresh.addUnitCredit(leftover);
+                    debug("only sell: " + book.name() + " icin envanterde " + leftover + " birim ara seviye var");
+                }
+            }
+
+            task.put(book, fresh);
+            debug("only sell: " + book.getRomanLevel(book.level()) + " icin 0 siparisli gorev acildi");
+        }
+
+        ActionLog.add(ActionLog.Tag.SYSTEM,
+                "only sell: checking storage for " + task.size() + " book line(s)");
+    }
+
+    /**
+     * STARTUP_CHECK iki depo sayfasını da taradıktan sonra çalışır.
+     *
+     * 1) Eli tamamen boş görevleri siler - ne envanterde, ne depoda, ne de ara
+     *    seviye kredisinde tek kitabı olmayan hat için yapacak iş yoktur;
+     *    silinmezse makro sahibi olmadığı kitap için boşuna çekiç açardı.
+     * 2) Kalan her görevi ANVIL'e yollar. ANVIL gerekiyorsa depodan çeker,
+     *    COMBINE birleştirir, SELL satar.
+     */
+    private void finishOnlySellStartup() {
+        if (!OnlySellMode.isEnabled()) return;
+
+        List<Book> empty = new ArrayList<>();
+        for (Map.Entry<Book, Task> entry : task.entrySet()) {
+            Task t = entry.getValue();
+            if (t.inEnderChest + t.inInventory + t.getUnitCredit() > 0) continue;
+            empty.add(entry.getKey());
+        }
+        for (Book book : empty) {
+            debug("only sell: " + book.getRomanLevel(book.level()) + " icin elde kitap yok, gorev kapatildi");
+            task.remove(book);
+        }
+
+        if (task.isEmpty()) {
+            ActionLog.add(ActionLog.Tag.SYSTEM, "only sell: no stock left - just watching sell orders");
+            return;
+        }
+
+        for (Book book : new ArrayList<>(task.keySet())) {
+            Task t = task.get(book);
+            ActionLog.add(ActionLog.Tag.ANVIL, book.name() + " " + book.getRomanLevel(book.level())
+                    + ": " + (t.inInventory + t.inEnderChest) + " on hand, combining");
+            editStateBook(book, BookState.ANVIL);
+        }
+        ActionLog.add(ActionLog.Tag.SYSTEM, "only sell: " + task.size() + " line(s) have stock to finish");
+    }
+
+    /** Açılışta bir kez açık satış emirlerini okumamız gerekiyor mu? */
+    private boolean needsSellScan() {
+        return OnlySellMode.isEnabled() && !sellScanDone;
+    }
+
+    /**
+     * AÇIK OLAN "Manage Orders" ekranındaki SATIŞ emirlerini izlemeye alır.
+     *
+     * NEDEN GEREKLİ: BazaarMonitor yalnızca makronun BU OTURUMDA kendi açtığı
+     * satış emirlerini biliyordu (SELL / REPLACE_SELL içindeki add çağrıları).
+     * Oyunu kapatıp açınca o liste sıfırlanıyor, önceki oturumda bırakılmış
+     * satış emirleri hiç izlenmiyor ve outbid asla tespit edilmiyordu.
+     */
+    private void registerOpenSellOrders() {
+        List<Integer> slots = inventoryScanner.getSellOrder();
+        if (slots.isEmpty()) {
+            ActionLog.add(ActionLog.Tag.SELL, "no open sell order found");
+            return;
+        }
+
+        int watched = 0;
+        for (int slot : slots) {
+            String sellName = inventoryScanner.getName(slot).replace("SELL ", "").trim();
+            Book book = findBookBySellName(sellName);
+            if (book == null) {
+                debug("[SELL_SCAN] '" + sellName + "' config'te yok, atlandi");
+                continue;
+            }
+
+            double price = inventoryScanner.getUnitPrice(slot);
+            if (price <= 0) {
+                // Fiyat okunamadi. 0 ile kaydetsek monitor her turda "fiyat
+                // degismis" sanip bos yere iptal-yeniden listele turu atardi.
+                ActionLog.add(ActionLog.Tag.SELL, sellName + ": unit price unreadable, not watched");
+                continue;
+            }
+
+            bazaarMonitor.add(book, price, true);
+            watched++;
+            debug("[SELL_SCAN] izlemeye alindi: " + sellName + " @ " + price);
+        }
+
+        ActionLog.add(ActionLog.Tag.SELL, "watching " + watched + " open sell order(s) for outbids");
     }
 
     private void processData() {
@@ -1461,6 +1839,10 @@ public class BazaarFlipper implements Feature {
         // ONLY SELL: yeni HAT acilmaz. Mevcut gorevler (SELECTED dahil) normal
         // isler - outbid yenen bir siparis SELECTED'a doner ve yeniden acilmasi
         // GEREKIR, yoksa havuz tek sayiya duser ve zincir yarim kalir.
+        //
+        // Only Sell'de buraya zaten girilmez: FETCHING bu modu kendi basinda
+        // karsilar ve seedOnlySellTasks()'i cagirip IDLE'a gecer. Bu satir yine
+        // de dursun - processData baska bir yerden cagrilirsa emniyet olsun.
         if (OnlySellMode.blocksNewOrders()) return;
         debug("item check passed");
         double purse = scoreboardUtils.getPurse();
@@ -1693,12 +2075,27 @@ public class BazaarFlipper implements Feature {
     private void updateOnlySellPhase() {
         if (!OnlySellMode.isEnabled()) {
             OnlySellMode.setPhase(OnlySellMode.Phase.OFF);
+            // Mod kapatildi: satis emri taramasi "yapildi" sayilmasin. Kullanici
+            // ayni oturumda tekrar acarsa emirler yeniden okunmali, yoksa o
+            // acilista hicbir satis emri izlenmez.
+            sellScanDone = false;
+            sellScanAttempts = 0;
             return;
         }
 
         // Only Sell'de alim yapilmiyor; eski bir "para yetmiyor" bayragi
         // takili kalirsa IDLE 60 sn sonra bosuna REPLACE_SELL'e kacar.
         notEnoughCash = false;
+
+        // ACILIS BITENE KADAR FAZ HESAPLANMAZ. Gorevler daha yeni kuruluyor ve
+        // depo henuz sayilmadi; bos haritaya bakip "alim bitti" desek uptime
+        // makro baslar baslamaz duruyor ve sohbete yanlis mesaj dusuyordu.
+        // Kullanicinin logunda 15:28:47'de ucu de ayni saniyede gorunmesinin
+        // sebebi buydu.
+        if (firstStartUp) {
+            OnlySellMode.setPhase(OnlySellMode.Phase.FINISHING);
+            return;
+        }
 
         boolean buying = false;
         for (Task t : task.values()) {
@@ -1723,17 +2120,33 @@ public class BazaarFlipper implements Feature {
     /** Config'te bu satis adina ("Wisdom V") sahip kitabi bulur. */
     private Book findBookBySellName(String sellName) {
         if (sellName == null || GoofyConfig.INSTANCE == null) return null;
+        String needle = sellName.trim();
+
         for (Book book : GoofyConfig.INSTANCE.books) {
-            if (book.getRomanLevel(book.sellLevel()).equals(sellName)) return book;
+            if (book.getRomanLevel(book.sellLevel()).equals(needle)) return book;
+        }
+        // Manage Orders ekranindaki ad basinda adet ("16x ") gibi ekler
+        // tasiyabiliyor. SONDAN eslestiririz - contains kullansaydik
+        // "Ultimate Wise VI" adi "Ultimate Wise V" ile eslesirdi ve iki ayri
+        // emir ayni Book'a baglanip birbirinin fiyatini ezerdi (BazaarMonitor
+        // (book, isSellOrder) ikilisine gore tekillestiriyor). Sonuc: saglikli
+        // emir "fiyat degismis" sanilip bosuna iptal edilip yeniden acilirdi.
+        for (Book book : GoofyConfig.INSTANCE.books) {
+            if (needle.endsWith(book.getRomanLevel(book.sellLevel()))) return book;
         }
         return null;
     }
 
-    /** Satis emri outbid yendi. Islemi IDLE yapar - burada sadece bayrak. */
+    /**
+     * Satis emri outbid yendi. Islemi IDLE yapar - burada sadece kayit.
+     *
+     * DIKKAT: bu metot BazaarMonitor'un HTTP thread'inden cagriliyor. Sadece
+     * thread-safe kuyruga yazar; gorev haritasina veya state'e dokunmaz.
+     */
     private void handleSellOutbid(Book book) {
-        sellOutbidPending = true;
-        ActionLog.add(ActionLog.Tag.OUTBID,
-                book.getRomanLevel(book.sellLevel()) + " sell order was outbid");
+        String name = book.getRomanLevel(book.sellLevel());
+        pendingSellOutbids.add(name);
+        ActionLog.add(ActionLog.Tag.OUTBID, name + " sell order was outbid");
         bazaarMonitor.finishSell(book);
     }
 
@@ -1816,6 +2229,7 @@ public class BazaarFlipper implements Feature {
             case ANVIL -> 30_000;
             case COMBINE -> 30_000;
             case SELL -> 30_000;
+            case SELL_SCAN -> 25_000;
             case REPLACE_SELL -> 45_000;
         };
     }
@@ -1960,11 +2374,26 @@ public class BazaarFlipper implements Feature {
             this.amountToOrder = Math.max(0, this.amountToOrder - units);
         }
 
+        private int getUnitCredit() {
+            return unitCredit;
+        }
+
         private int getAmountToOrder() {
             return amountToOrder - (inEnderChest + inInventory);
         }
 
+        /** Depoda bu göreve ait ARA SEVİYE kitap görüldü mü? */
+        private boolean storageLeftover = false;
+        /** ANVIL "envanter dolu" deyip kac kez geri dondu? (Only Sell dongu emniyeti) */
+        private int anvilFullBounces = 0;
+
         private boolean shouldCheckEnderChest() {
+            // inEnderChest yalnizca TABAN SEVIYE kitaplari sayar. Depoda sadece
+            // ara seviye (III, IV...) kitap varsa bu sayac 0'dir ama kitaplar
+            // orada durur. ANVIL'e ugramazsak IDLE dogrudan COMBINE'a gecer,
+            // cekic bos elle acilir ve hat "havuz eksik" diye dusurulur - kitaplar
+            // depoda curur. ANVIL ise leftoverContainerSlots ile onlari cekebiliyor.
+            if (storageLeftover) return true;
             return inEnderChest > 0;
         }
 

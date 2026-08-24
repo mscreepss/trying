@@ -20,7 +20,13 @@ public class InventoryScanner {
     // "You have 5 items to claim!" -> 5
     private static final Pattern CLAIM_AMOUNT = Pattern.compile("You have\\s+([\\d,]+)");
     // "Unit price: 139,890.5 coins" -> 139890.5
-    private static final Pattern UNIT_PRICE = Pattern.compile("Unit price:\\s*([\\d,]+(?:\\.\\d+)?)");
+    //
+    // "Price per unit" da kabul edilir: siparis ACMA ekrani "Unit price" yaziyor
+    // ama Manage Orders ekranindaki acik siparis satirlari baska bir ifade
+    // kullanabiliyor. Iki yazimi da tanimazsak SELL_SCAN fiyati okuyamaz ve
+    // hicbir satis emrini izlemeye alamaz.
+    private static final Pattern UNIT_PRICE =
+            Pattern.compile("(?:Unit price|Price per unit):\\s*([\\d,]+(?:\\.\\d+)?)");
 
     public List<Integer> findInv(String name) {
         List<Integer> slots = new ArrayList<>();
