@@ -57,6 +57,16 @@ public class GoofyConfig {
      */
     public List<String> disabledBooks = new ArrayList<>();
 
+    /**
+     * Profit Scanner kara listesi: buradaki kitap ID'leri (taban ID, seviyesiz)
+     * Beta sekmesindeki taramada HIC gorunmez.
+     *
+     * NEDEN TABAN ID: kullanici "bu kitabi bir daha gorme" dedigi zaman level 1
+     * ve level 2 satirlarinin ikisini de kastediyor. Seviye saklarsak ayni kitap
+     * bir satir gizlense bile digerinden geri gelirdi.
+     */
+    public List<String> scannerBlacklist = new ArrayList<>();
+
     // Kalıcı bazaar ekonomi istatistikleri (EconomyTracker)
     public double totalSpend = 0;
     public double totalEarn = 0;
@@ -160,6 +170,40 @@ public class GoofyConfig {
         save();
     }
 
+    // =====================================================================
+    // Profit Scanner kara listesi
+    // =====================================================================
+
+    /** Bu taban ID tarayicida gizli mi? */
+    public static boolean isBlacklisted(String baseId) {
+        if (INSTANCE == null || INSTANCE.scannerBlacklist == null || baseId == null) return false;
+        return INSTANCE.scannerBlacklist.contains(baseId);
+    }
+
+    public static synchronized void blacklist(String baseId) {
+        if (INSTANCE == null || baseId == null) return;
+        if (INSTANCE.scannerBlacklist == null) INSTANCE.scannerBlacklist = new ArrayList<>();
+        if (INSTANCE.scannerBlacklist.contains(baseId)) return;
+        List<String> copy = new ArrayList<>(INSTANCE.scannerBlacklist);
+        copy.add(baseId);
+        INSTANCE.scannerBlacklist = copy;
+        save();
+    }
+
+    public static synchronized void unBlacklist(String baseId) {
+        if (INSTANCE == null || INSTANCE.scannerBlacklist == null || baseId == null) return;
+        List<String> copy = new ArrayList<>(INSTANCE.scannerBlacklist);
+        if (!copy.remove(baseId)) return;
+        INSTANCE.scannerBlacklist = copy;
+        save();
+    }
+
+    /** Kara listenin okunur kopyasi (arayuz bunu gezerken liste degisebilir). */
+    public static List<String> blacklist() {
+        if (INSTANCE == null || INSTANCE.scannerBlacklist == null) return new ArrayList<>();
+        return new ArrayList<>(INSTANCE.scannerBlacklist);
+    }
+
     /** Aynı id + level ikilisi zaten var mı? (aynı hattın iki kez tanımlanması hataya yol açar) */
     public static boolean hasBook(String id, int level, int ignoreIndex) {
         if (INSTANCE == null) return false;
@@ -190,6 +234,7 @@ public class GoofyConfig {
         if (INSTANCE.books == null) INSTANCE.books = new ArrayList<>();
         if (INSTANCE.keys == null) INSTANCE.keys = new Keys();
         if (INSTANCE.disabledBooks == null) INSTANCE.disabledBooks = new ArrayList<>();
+        if (INSTANCE.scannerBlacklist == null) INSTANCE.scannerBlacklist = new ArrayList<>();
         // Eski config'lerde bu alanlar 0 gelir; 0 dakika = sonsuz dongu demek.
         if (INSTANCE.workMinMinutes <= 0) INSTANCE.workMinMinutes = 20;
         if (INSTANCE.workMaxMinutes <= INSTANCE.workMinMinutes) INSTANCE.workMaxMinutes = INSTANCE.workMinMinutes + 20;
