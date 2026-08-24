@@ -44,6 +44,9 @@ public class PresetsTab {
     private Widgets.Button addButton;
     private Widgets.Button refreshButton;
 
+    /** Fareyle sürüklenebilir kaydırma çubuğu. */
+    private final Widgets.ScrollBar bar = new Widgets.ScrollBar();
+
     /** Sayfa kendi modalını yönetir; GoofyScreen sadece çizim sırasını verir. */
     private BookForm modal = null;
     private int screenW, screenH;
@@ -119,8 +122,9 @@ public class PresetsTab {
         List<BookPresets.Preset> presets = BookPresets.all();
 
         Draw.text(g, "BOOK LIBRARY", x, y + 3, Theme.TEXT);
-        Draw.text(g, presets.size() + " saved  -  add here, then activate what you want to run",
-                x, y + 16, Theme.TEXT_FAINT);
+        // Butonlar y+2 ... y+24 arasinda; alt yazi onlarin altina kacmasin.
+        Draw.text(g, Draw.clip(presets.size() + " saved  -  add here, then activate what you want to run",
+                w - 186), x, y + 16, Theme.TEXT_FAINT);
 
         addButton.render(g, mouseX, mouseY);
         refreshButton.render(g, mouseX, mouseY);
@@ -138,18 +142,16 @@ public class PresetsTab {
         }
 
         int visible = visibleRows();
-        scroll = clamp(scroll, 0, Math.max(0, presets.size() - visible));
+        bar.bounds(x, listY, w, listH);
+        bar.setContent(presets.size(), visible);
+        if (bar.isDragging()) scroll = bar.drag(mouseY);
+        scroll = clamp(scroll, 0, bar.maxScroll());
 
         for (int i = 0; i < visible && (i + scroll) < presets.size(); i++) {
             renderRow(g, presets.get(i + scroll), listY + 2 + i * ROW_H, mouseX, mouseY);
         }
 
-        int maxScroll = Math.max(0, presets.size() - visible);
-        if (maxScroll > 0) {
-            int barH = Math.max(16, listH * visible / Math.max(1, presets.size()));
-            int barY = listY + (listH - barH) * scroll / maxScroll;
-            Draw.rect(g, x + w - 3, barY, 2, barH, Theme.STROKE);
-        }
+        bar.render(g, scroll, mouseX, mouseY);
     }
 
     private void renderRow(GuiGraphicsExtractor g, BookPresets.Preset preset, int ry, int mouseX, int mouseY) {
@@ -258,6 +260,7 @@ public class PresetsTab {
 
         if (addButton.mouseClicked(mouseX, mouseY)) return true;
         if (refreshButton.mouseClicked(mouseX, mouseY)) return true;
+        if (bar.mouseClicked(mouseX, mouseY)) return true;
 
         List<BookPresets.Preset> presets = BookPresets.all();
         int visible = visibleRows();
@@ -283,6 +286,11 @@ public class PresetsTab {
             }
         }
         return false;
+    }
+
+    public void mouseReleased() {
+        bar.release();
+        if (modal != null) modal.mouseReleased();
     }
 
     public boolean mouseScrolled(double direction) {

@@ -84,6 +84,12 @@ public class BookForm {
     private final int overlayRowH = 24;
     private int overlayScroll = 0;
 
+    /**
+     * Arama ve envanter katmanları aynı anda açılamaz, o yüzden tek bir
+     * sürüklenebilir çubuk ikisine de yetiyor.
+     */
+    private final Widgets.ScrollBar overlayBar = new Widgets.ScrollBar();
+
     private final Widgets.TextBox searchBox;
     private List<ItemCatalog.Entry> searchResults = new ArrayList<>();
     private List<InventoryBook> inventoryBooks = new ArrayList<>();
@@ -345,7 +351,10 @@ public class BookForm {
         }
 
         int visible = Math.max(1, (overlayListH - 4) / overlayRowH);
-        overlayScroll = clamp(overlayScroll, 0, Math.max(0, searchResults.size() - visible));
+        overlayBar.bounds(overlayX + 12, overlayListY, overlayW - 24, overlayListH);
+        overlayBar.setContent(searchResults.size(), visible);
+        if (overlayBar.isDragging()) overlayScroll = overlayBar.drag(mouseY);
+        overlayScroll = clamp(overlayScroll, 0, overlayBar.maxScroll());
 
         for (int i = 0; i < visible && (i + overlayScroll) < searchResults.size(); i++) {
             ItemCatalog.Entry entry = searchResults.get(i + overlayScroll);
@@ -353,20 +362,49 @@ public class BookForm {
             boolean hover = Draw.inside(mouseX, mouseY, overlayX + 13, ry, overlayW - 26, overlayRowH - 1);
             if (hover) Draw.rect(g, overlayX + 13, ry, overlayW - 26, overlayRowH - 1, Theme.HOVER);
 
-            Draw.text(g, Draw.clip(entry.displayName(), overlayW - 150), overlayX + 24, ry + 3, Theme.TEXT);
-            Draw.text(g, Draw.clip(entry.baseId(), overlayW - 150), overlayX + 24, ry + 13, Theme.TEXT_FAINT);
+            Draw.text(g, Draw.clip(entry.displayName(), overlayW - 170), overlayX + 24, ry + 3, Theme.TEXT);
+            Draw.text(g, Draw.clip(entry.baseId(), overlayW - 170), overlayX + 24, ry + 13, Theme.TEXT_FAINT);
 
-            BazaarLookup.Quick quick = BazaarLookup.get(entry.baseId() + "_1");
-            String price = quick == null ? "-" : "buy " + StatsTab.coins(quick.sellPrice());
-            Draw.textRight(g, price, overlayX + overlayW - 24, ry + 8, Theme.ACCENT);
+            // ESKIDEN burada level 1'in ALIS FIYATI yaziyordu ve karar verdirmiyordu -
+            // ucuz kitap iyi, pahali kitap kotu demek degil. Artik "level 1'den bu
+            // kitabin en yuksek seviyesine kadar birlestirirsem ne kalir" yaziyor.
+            double[] profit = profitOf(entry.baseId());
+            if (profit == null) {
+                Draw.textRight(g, "no price", overlayX + overlayW - 24, ry + 8, Theme.TEXT_FAINT);
+            } else {
+                String value = (profit[0] >= 0 ? "+" : "-") + StatsTab.coins(Math.abs(profit[0]));
+                Draw.textRight(g, value, overlayX + overlayW - 24, ry + 3,
+                        profit[0] >= 0 ? Theme.GREEN : Theme.RED);
+                Draw.textRight(g, "1 \u2192 " + (int) profit[2] + "   " + Math.round(profit[1]) + "%",
+                        overlayX + overlayW - 24, ry + 13, Theme.TEXT_FAINT);
+            }
         }
 
-        int maxScroll = Math.max(0, searchResults.size() - visible);
-        if (maxScroll > 0) {
-            int barH = Math.max(14, overlayListH * visible / Math.max(1, searchResults.size()));
-            int barY = overlayListY + (overlayListH - barH) * overlayScroll / maxScroll;
-            Draw.rect(g, overlayX + overlayW - 15, barY, 2, barH, Theme.STROKE);
-        }
+        overlayBar.render(g, overlayScroll, mouseX, mouseY);
+    }
+
+    /**
+     * "Level 1'den bu kitabın EN YÜKSEK seviyesine kadar birleştirirsem ne
+     * kazanırım?" hesabı.
+     *
+     * @return {temiz kâr, yüzde, hedef seviye} ya da fiyat yoksa null
+     */
+    private static double[] profitOf(String baseId) {
+        int max = ItemCatalog.maxLevel(baseId);
+        if (max < 2) return null;
+
+        BazaarLookup.Quick buy = BazaarLookup.get(baseId + "_1");
+        BazaarLookup.Quick sell = BazaarLookup.get(baseId + "_" + max);
+        if (buy == null || sell == null) return null;
+        if (buy.sellPrice() <= 0 || sell.buyPrice() <= 0) return null;
+
+        // Her seviye bir oncekinden 2 adet ister: 1'den max'a 2^(max-1) adet.
+        int qty = 1 << (max - 1);
+        double cost = buy.sellPrice() * qty;
+        if (cost <= 0) return null;
+
+        double clean = sell.buyPrice() * (1 - TAX) - cost;
+        return new double[]{clean, clean / cost * 100.0, max};
     }
 
     // ------------------------------------------------------------------ onay katmanı
@@ -384,17 +422,36 @@ public class BookForm {
                 overlayX + 18, cy + 32, Theme.TEXT_FAINT);
 
         if (pendingChoice != null) {
-            Draw.panel(g, overlayX + 18, cy + 48, overlayW - 36, 56, Theme.CARD, Theme.STROKE);
+            Draw.panel(g, overlayX + 18, cy + 48, overlayW - 36, 68, Theme.CARD, Theme.STROKE);
             Draw.text(g, Draw.clip(pendingChoice.displayName(), overlayW - 58),
-                    overlayX + 28, cy + 57, Theme.TEXT);
+                    overlayX + 28, cy + 56, Theme.TEXT);
             Draw.text(g, Draw.clip(pendingChoice.baseId(), overlayW - 58),
-                    overlayX + 28, cy + 70, Theme.ACCENT);
+                    overlayX + 28, cy + 69, Theme.ACCENT);
 
-            BazaarLookup.Quick quick = BazaarLookup.get(pendingChoice.baseId() + "_1");
-            String price = quick == null
+            // ALIS her zaman LEVEL 1'den, SATIS kitabin EN YUKSEK seviyesinden.
+            // Eskiden ikisi de level 1'in fiyatindan okunuyordu; satis fiyati
+            // bu yuzden anlamsizdi (kimse level 1 satmiyor).
+            int max = ItemCatalog.maxLevel(pendingChoice.baseId());
+            BazaarLookup.Quick buy = BazaarLookup.get(pendingChoice.baseId() + "_1");
+            BazaarLookup.Quick sell = max > 1 ? BazaarLookup.get(pendingChoice.baseId() + "_" + max) : null;
+
+            String price = buy == null
                     ? "no bazaar price found"
-                    : "buy " + StatsTab.coins(quick.sellPrice()) + "   sell " + StatsTab.coins(quick.buyPrice());
-            Draw.text(g, price, overlayX + 28, cy + 85, Theme.TEXT_DIM);
+                    : "buy lvl 1  " + StatsTab.coins(buy.sellPrice())
+                    + "      sell lvl " + max + "  "
+                    + (sell == null ? "-" : StatsTab.coins(sell.buyPrice()));
+            Draw.text(g, price, overlayX + 28, cy + 84, Theme.TEXT_DIM);
+
+            double[] profit = profitOf(pendingChoice.baseId());
+            if (profit == null) {
+                Draw.text(g, "clean profit unknown - no bazaar data", overlayX + 28, cy + 98, Theme.TEXT_FAINT);
+            } else {
+                String value = (profit[0] >= 0 ? "+" : "-") + StatsTab.coins(Math.abs(profit[0]));
+                Draw.text(g, "clean profit", overlayX + 28, cy + 98, Theme.TEXT_FAINT);
+                int vx = overlayX + 28 + Draw.textWidth("clean profit") + 6;
+                Draw.text(g, value + "  (" + Math.round(profit[1]) + "%)   needs " + (1 << (max - 1)) + "x",
+                        vx, cy + 98, profit[0] >= 0 ? Theme.GREEN : Theme.RED);
+            }
         }
 
         int by = cy + ch - 30;
@@ -428,7 +485,10 @@ public class BookForm {
         }
 
         int visible = Math.max(1, (listH - 4) / overlayRowH);
-        overlayScroll = clamp(overlayScroll, 0, Math.max(0, inventoryBooks.size() - visible));
+        overlayBar.bounds(overlayX + 12, listY, overlayW - 24, listH);
+        overlayBar.setContent(inventoryBooks.size(), visible);
+        if (overlayBar.isDragging()) overlayScroll = overlayBar.drag(mouseY);
+        overlayScroll = clamp(overlayScroll, 0, overlayBar.maxScroll());
 
         for (int i = 0; i < visible && (i + overlayScroll) < inventoryBooks.size(); i++) {
             InventoryBook entry = inventoryBooks.get(i + overlayScroll);
@@ -441,6 +501,8 @@ public class BookForm {
             Draw.text(g, Draw.clip(entry.baseId(), overlayW - 120), overlayX + 24, ry + 13, Theme.TEXT_FAINT);
             Draw.textRight(g, "x" + entry.count(), overlayX + overlayW - 24, ry + 8, Theme.ACCENT);
         }
+
+        overlayBar.render(g, overlayScroll, mouseX, mouseY);
     }
 
     // =====================================================================
@@ -452,6 +514,7 @@ public class BookForm {
 
         switch (overlay) {
             case SEARCH -> {
+                if (overlayBar.mouseClicked(mouseX, mouseY)) return true;
                 searchBox.mouseClicked(mouseX, mouseY);
                 clickList(mouseX, mouseY, overlayListY, overlayListH, searchResults.size(), index -> {
                     pendingChoice = searchResults.get(index);
@@ -460,6 +523,7 @@ public class BookForm {
                 return true;
             }
             case INVENTORY -> {
+                if (overlayBar.mouseClicked(mouseX, mouseY)) return true;
                 clickList(mouseX, mouseY, overlayY + 34, overlayH - 34 - 14, inventoryBooks.size(), index -> {
                     InventoryBook entry = inventoryBooks.get(index);
                     idBox.value = entry.baseId();
@@ -499,6 +563,11 @@ public class BookForm {
             onPick.accept(i + overlayScroll);
             return;
         }
+    }
+
+    /** Sürükleme fare bırakılınca biter. */
+    public void mouseReleased() {
+        overlayBar.release();
     }
 
     public boolean mouseScrolled(double direction) {

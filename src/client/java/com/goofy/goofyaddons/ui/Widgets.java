@@ -275,6 +275,101 @@ public final class Widgets {
     }
 
     // =====================================================================
+    // Kaydırma çubuğu
+    // =====================================================================
+
+    /**
+     * Fareyle TUTULUP SÜRÜKLENEBİLEN kaydırma çubuğu.
+     *
+     * Eskiden sadece Live Log'da vardı ve orada elle yazılmıştı; diğer listeler
+     * yalnızca tekerlekle kayıyordu. Artık tek bir bileşen var, listeler onu
+     * paylaşıyor.
+     *
+     * KULLANIM KALIBI (çizim ve tıklama aynı alanları kullanır):
+     *   bar.bounds(...); bar.setContent(total, visible);
+     *   if (bar.isDragging()) scroll = bar.drag(mouseY);
+     *   ... satırları çiz ...
+     *   bar.render(g, scroll, mouseX, mouseY);
+     * ve tıklamada: if (bar.mouseClicked(mx, my, scroll)) { ... }
+     */
+    public static class ScrollBar {
+        public static final int WIDTH = 6;
+
+        public int x, y, h;
+        private int total = 0;
+        private int visible = 1;
+        private boolean dragging = false;
+
+        /** İz (track) dikdörtgeni: listenin sağ kenarına yapışır. */
+        public ScrollBar bounds(int listX, int listY, int listW, int listH) {
+            this.x = listX + listW - WIDTH - 2;
+            this.y = listY + 1;
+            this.h = Math.max(10, listH - 2);
+            return this;
+        }
+
+        public void setContent(int total, int visible) {
+            this.total = Math.max(0, total);
+            this.visible = Math.max(1, visible);
+        }
+
+        public int maxScroll() {
+            return Math.max(0, total - visible);
+        }
+
+        public boolean needed() {
+            return maxScroll() > 0;
+        }
+
+        private int thumbHeight() {
+            return Math.max(18, h * visible / Math.max(1, total));
+        }
+
+        private int thumbY(int scroll) {
+            int max = maxScroll();
+            if (max <= 0) return y;
+            return y + (h - thumbHeight()) * clampInt(scroll, 0, max) / max;
+        }
+
+        public void render(GuiGraphicsExtractor g, int scroll, int mouseX, int mouseY) {
+            if (!needed()) return;
+            boolean hover = Draw.inside(mouseX, mouseY, x, y, WIDTH, h);
+            Draw.roundRect(g, x, y, WIDTH, h, Theme.INSET);
+            Draw.roundRect(g, x, thumbY(scroll), WIDTH, thumbHeight(),
+                    dragging ? Theme.ACCENT : (hover ? Theme.TEXT_DIM : Theme.HOVER));
+        }
+
+        /** İz üzerine tıklandıysa sürüklemeyi başlatır ve true döner. */
+        public boolean mouseClicked(double mouseX, double mouseY) {
+            if (!needed()) return false;
+            if (!Draw.inside(mouseX, mouseY, x - 2, y, WIDTH + 4, h)) return false;
+            dragging = true;
+            return true;
+        }
+
+        /** Sürükleme sırasında her karede çağrılır; yeni kaydırma değerini döner. */
+        public int drag(int mouseY) {
+            int max = maxScroll();
+            if (max <= 0) return 0;
+            int travel = Math.max(1, h - thumbHeight());
+            double ratio = (double) (mouseY - y - thumbHeight() / 2) / travel;
+            return clampInt((int) Math.round(ratio * max), 0, max);
+        }
+
+        public boolean isDragging() {
+            return dragging;
+        }
+
+        public void release() {
+            dragging = false;
+        }
+
+        private static int clampInt(int value, int min, int max) {
+            return Math.max(min, Math.min(max, value));
+        }
+    }
+
+    // =====================================================================
     // Aç/kapa anahtarı
     // =====================================================================
     public static class Toggle {

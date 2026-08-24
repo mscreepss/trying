@@ -102,6 +102,8 @@ public class GoofyScreen extends BaseScreen {
     private int editBtnX, editBtnW, delBtnX, delBtnW, rowBtnH;
     private int switchX, switchW, switchH;
     private int bookScroll = 0;
+    /** Aktif kitap listesinin sürüklenebilir kaydırma çubuğu. */
+    private final Widgets.ScrollBar bookBar = new Widgets.ScrollBar();
 
     // --- books > general ---
     private int setRowsY, setRowH, fieldX, fieldW;
@@ -587,8 +589,10 @@ public class GoofyScreen extends BaseScreen {
         Draw.panel(g, colX, listY, colW, listH, Theme.CARD, Theme.STROKE);
 
         int visible = visibleBookRows();
-        int maxScroll = Math.max(0, books.size() - visible);
-        if (bookScroll > maxScroll) bookScroll = maxScroll;
+        bookBar.bounds(colX, listY, colW, listH);
+        bookBar.setContent(books.size(), visible);
+        if (bookBar.isDragging()) bookScroll = bookBar.drag(mouseY);
+        bookScroll = clamp(bookScroll, 0, bookBar.maxScroll());
 
         if (books.isEmpty()) {
             Draw.textCentered(g, "No active books", colX + colW / 2, listY + listH / 2 - 12, Theme.TEXT_DIM);
@@ -625,11 +629,7 @@ public class GoofyScreen extends BaseScreen {
             miniButton(g, "Delete", delBtnX, ry + 5, delBtnW, mouseX, mouseY, Theme.RED);
         }
 
-        if (maxScroll > 0) {
-            int barH = Math.max(14, listH * visible / Math.max(1, books.size()));
-            int barY = listY + (listH - barH) * bookScroll / maxScroll;
-            Draw.rect(g, colX + colW - 3, barY, 2, barH, Theme.STROKE);
-        }
+        bookBar.render(g, bookScroll, mouseX, mouseY);
     }
 
     private int visibleBookRows() {
@@ -764,6 +764,8 @@ public class GoofyScreen extends BaseScreen {
     }
 
     private void activeBooksClicked(double mouseX, double mouseY, GoofyConfig config) {
+        if (bookBar.mouseClicked(mouseX, mouseY)) return;
+
         int visible = visibleBookRows();
         for (int i = 0; i < visible && (i + bookScroll) < config.books.size(); i++) {
             int index = i + bookScroll;
@@ -793,8 +795,14 @@ public class GoofyScreen extends BaseScreen {
 
     @Override
     public boolean mouseReleased(MouseButtonEvent event) {
-        // Log kaydirma cubugunun surukleme bitisi buradan geliyor.
+        // TUM kaydirma cubuklarinin surukleme bitisi buradan geliyor. Hangi
+        // sayfada oldugumuza bakmadan hepsi birakiliyor: sayfa degistirirken
+        // fare basili kalmis olabilir, o cubuk yapisik kalmasin.
         statsTab.mouseReleased();
+        presetsTab.mouseReleased();
+        betaTab.mouseReleased();
+        bookBar.release();
+        if (modal != null) modal.mouseReleased();
         return super.mouseReleased(event);
     }
 

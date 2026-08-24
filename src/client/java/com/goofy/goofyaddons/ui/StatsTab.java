@@ -49,20 +49,26 @@ public class StatsTab {
     private static final int LOG_ROW_H = 12;
     private static final int BOOK_ROW_H = 30;
 
-    /** Kaydırma çubuğu genişliği - sürüklenebilmesi için parmak kalınlığında. */
-    private static final int BAR_W = 6;
-
     private int x, y, w, h;
     private int segW;
     private int bodyY, bodyH;
+    /** Per Book listesi, kolon başlıklarına yer açmak için biraz aşağıdan başlar. */
+    private int booksBodyY, booksBodyH;
     private int scopeX, scopeY, scopeW, scopeH;
 
     private int historyScroll = 0;
     private int logScroll = 0;
     private int bookScroll = 0;
 
-    /** Log kaydırma çubuğu sürükleniyor mu? */
-    private boolean draggingLogBar = false;
+    /**
+     * Üç bölümün de KENDİ sürüklenebilir çubuğu var. Ayrı tutuluyorlar çünkü
+     * her birinin satır sayısı ve kaydırma değeri farklı; tek çubuk paylaşsalar
+     * bölüm değiştirince yanlış konumdan devam ederdi.
+     */
+    private final Widgets.ScrollBar historyBar = new Widgets.ScrollBar();
+    private final Widgets.ScrollBar logBar = new Widgets.ScrollBar();
+    private final Widgets.ScrollBar bookBar = new Widgets.ScrollBar();
+
     private Widgets.Button copyButton;
     private String copyFeedback = null;
     private long copyFeedbackMs = 0;
@@ -76,6 +82,12 @@ public class StatsTab {
 
         this.bodyY = y + SEG_H + 18;
         this.bodyH = Math.max(30, (y + h) - bodyY);
+
+        // Kolon basliklari bodyY + 2'ye yazilir, liste 14px asagidan baslar.
+        // Basliklar eskiden bodyY - 12'ye ciziliyordu ve "all time" yazisiyla
+        // Session/Total anahtarinin UZERINE biniyordu.
+        this.booksBodyY = bodyY + 14;
+        this.booksBodyH = Math.max(30, (y + h) - booksBodyY);
 
         this.scopeW = 64;
         this.scopeH = 15;
@@ -155,7 +167,10 @@ public class StatsTab {
         }
 
         int visible = Math.max(1, (bodyH - 4) / HISTORY_ROW_H);
-        historyScroll = clamp(historyScroll, 0, Math.max(0, records.size() - visible));
+        historyBar.bounds(x, bodyY, w, bodyH);
+        historyBar.setContent(records.size(), visible);
+        if (historyBar.isDragging()) historyScroll = historyBar.drag(mouseY);
+        historyScroll = clamp(historyScroll, 0, historyBar.maxScroll());
 
         for (int i = 0; i < visible && (i + historyScroll) < records.size(); i++) {
             TradeRecord record = records.get(i + historyScroll);
@@ -194,7 +209,7 @@ public class StatsTab {
             }
         }
 
-        renderScrollbar(g, records.size(), visible, historyScroll, false);
+        historyBar.render(g, historyScroll, mouseX, mouseY);
     }
 
     // ------------------------------------------------------------------ LIVE LOG
@@ -204,15 +219,9 @@ public class StatsTab {
         int visible = Math.max(1, (bodyH - 6) / LOG_ROW_H);
 
         // Surukleme: cubuk tutulduysa her karede fare konumundan kaydirma hesaplanir.
-        if (draggingLogBar) {
-            int maxScroll = Math.max(0, lines.size() - visible);
-            if (maxScroll > 0) {
-                int barH = thumbHeight(lines.size(), visible);
-                int travel = Math.max(1, bodyH - barH);
-                double ratio = (double) (mouseY - bodyY - barH / 2) / travel;
-                logScroll = clamp((int) Math.round(ratio * maxScroll), 0, maxScroll);
-            }
-        }
+        logBar.bounds(x, bodyY, w, bodyH);
+        logBar.setContent(lines.size(), visible);
+        if (logBar.isDragging()) logScroll = logBar.drag(mouseY);
 
         String note = copyFeedback != null && System.currentTimeMillis() - copyFeedbackMs < 2500
                 ? copyFeedback
@@ -228,7 +237,7 @@ public class StatsTab {
             return;
         }
 
-        logScroll = clamp(logScroll, 0, Math.max(0, lines.size() - visible));
+        logScroll = clamp(logScroll, 0, logBar.maxScroll());
 
         for (int i = 0; i < visible && (i + logScroll) < lines.size(); i++) {
             ActionLog.Entry entry = lines.get(i + logScroll);
@@ -251,7 +260,7 @@ public class StatsTab {
             Draw.text(g, Draw.clip(entry.message(), x + w - 14 - msgX), msgX, ry, Theme.TEXT_DIM);
         }
 
-        renderScrollbar(g, lines.size(), visible, logScroll, true);
+        logBar.render(g, logScroll, mouseX, mouseY);
     }
 
     private int tagColor(ActionLog.Tag tag) {
@@ -277,7 +286,10 @@ public class StatsTab {
         renderScopeToggle(g, mouseX, mouseY);
 
         // --- kolon başlıkları: satırlarla BİREBİR aynı x'leri kullanır ---
-        int headerY = bodyY - 12;
+        // Basliklar listenin HEMEN USTUNDE (bodyY + 2). Eskiden bodyY - 12'ye
+        // yaziliyorlardi ve ustteki "all time" yazisi ile Session/Total
+        // anahtarinin uzerine biniyorlardi.
+        int headerY = bodyY + 2;
         Draw.text(g, "BOOK", x + 12, headerY, Theme.TEXT_FAINT);
         Draw.textRight(g, "BOUGHT", colBought(), headerY, Theme.TEXT_FAINT);
         Draw.textRight(g, "SOLD", colSold(), headerY, Theme.TEXT_FAINT);
@@ -285,22 +297,25 @@ public class StatsTab {
         Draw.textRight(g, "PROFIT", colProfit(), headerY, Theme.TEXT_FAINT);
         Draw.textRight(g, "CLEAN", colClean(), headerY, Theme.TEXT_FAINT);
 
-        Draw.panel(g, x, bodyY, w, bodyH, Theme.CARD, Theme.STROKE);
+        Draw.panel(g, x, booksBodyY, w, booksBodyH, Theme.CARD, Theme.STROKE);
 
         List<String> names = new ArrayList<>(stats.keySet());
         if (names.isEmpty()) {
             Draw.textCentered(g, booksShowSession ? "Nothing traded this session" : "Nothing recorded yet",
-                    x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
+                    x + w / 2, booksBodyY + booksBodyH / 2 - 4, Theme.TEXT_FAINT);
             return;
         }
 
-        int visible = Math.max(1, (bodyH - 4) / BOOK_ROW_H);
-        bookScroll = clamp(bookScroll, 0, Math.max(0, names.size() - visible));
+        int visible = Math.max(1, (booksBodyH - 4) / BOOK_ROW_H);
+        bookBar.bounds(x, booksBodyY, w, booksBodyH);
+        bookBar.setContent(names.size(), visible);
+        if (bookBar.isDragging()) bookScroll = bookBar.drag(mouseY);
+        bookScroll = clamp(bookScroll, 0, bookBar.maxScroll());
 
         for (int i = 0; i < visible && (i + bookScroll) < names.size(); i++) {
             String name = names.get(i + bookScroll);
             TradeHistory.Stats stat = stats.get(name);
-            int ry = bodyY + 2 + i * BOOK_ROW_H;
+            int ry = booksBodyY + 2 + i * BOOK_ROW_H;
 
             if (Draw.inside(mouseX, mouseY, x + 1, ry, w - 2, BOOK_ROW_H - 1)) {
                 Draw.rect(g, x + 1, ry, w - 2, BOOK_ROW_H - 1, Theme.HOVER);
@@ -323,7 +338,7 @@ public class StatsTab {
             }
         }
 
-        renderScrollbar(g, names.size(), visible, bookScroll, false);
+        bookBar.render(g, bookScroll, mouseX, mouseY);
     }
 
     private String levelBreakdown(TradeHistory.Stats stat) {
@@ -339,24 +354,36 @@ public class StatsTab {
         return out.toString();
     }
 
-    private int colBought() {
-        return x + (int) (w * 0.46);
-    }
-
-    private int colSold() {
-        return x + (int) (w * 0.56);
-    }
-
-    private int colSpend() {
-        return x + (int) (w * 0.72);
-    }
-
-    private int colProfit() {
-        return x + (int) (w * 0.87);
-    }
+    // =====================================================================
+    // Kolon x'leri
+    //
+    // ESKIDEN oran tabanliydi (w * 0.87 gibi). w ~392 iken PROFIT ile CLEAN
+    // arasinda yalnizca ~39px kaliyordu ama "+127.7M" ~42px genislikte -
+    // ekran goruntusundeki "+127.7M+122.2M" ust uste binmesi buydu.
+    //
+    // ARTIK sagdan sola SABIT paylarla yerlesiyorlar: her sayi kolonuna en az
+    // 48px, adet kolonlarina daha az. Boylece GUI genisligi ne olursa olsun
+    // iki sayi birbirine degmez.
+    // =====================================================================
 
     private int colClean() {
         return x + w - 12;
+    }
+
+    private int colProfit() {
+        return colClean() - Math.max(50, w / 7);
+    }
+
+    private int colSpend() {
+        return colProfit() - Math.max(50, w / 7);
+    }
+
+    private int colSold() {
+        return colSpend() - Math.max(40, w / 9);
+    }
+
+    private int colBought() {
+        return colSold() - Math.max(34, w / 11);
     }
 
     private void renderScopeToggle(GuiGraphicsExtractor g, int mouseX, int mouseY) {
@@ -382,7 +409,7 @@ public class StatsTab {
         for (int i = 0; i < sections.length; i++) {
             if (Draw.inside(mouseX, mouseY, segX(i), y, segWidth(i), SEG_H)) {
                 activeSection = sections[i];
-                draggingLogBar = false;
+                mouseReleased();
                 return true;
             }
         }
@@ -397,20 +424,21 @@ public class StatsTab {
             }
         }
 
-        if (activeSection == Section.LOG) {
-            if (copyButton.mouseClicked(mouseX, mouseY)) return true;
-            // Cubuga (ya da izine) basildiysa surukleme baslar.
-            if (Draw.inside(mouseX, mouseY, barX(), bodyY, BAR_W, bodyH)) {
-                draggingLogBar = true;
-                return true;
-            }
-        }
-        return false;
+        if (activeSection == Section.LOG && copyButton.mouseClicked(mouseX, mouseY)) return true;
+
+        // Uc bolumun de cubugu artik surukleniyor.
+        return switch (activeSection) {
+            case HISTORY -> historyBar.mouseClicked(mouseX, mouseY);
+            case LOG -> logBar.mouseClicked(mouseX, mouseY);
+            case BOOKS -> bookBar.mouseClicked(mouseX, mouseY);
+        };
     }
 
     /** Sürükleme burada biter - HudEditScreen ile aynı kalıp. */
     public void mouseReleased() {
-        draggingLogBar = false;
+        historyBar.release();
+        logBar.release();
+        bookBar.release();
     }
 
     public boolean mouseScrolled(double direction) {
@@ -428,31 +456,6 @@ public class StatsTab {
     // =====================================================================
     // Yardımcılar
     // =====================================================================
-
-    private int barX() {
-        return x + w - BAR_W - 2;
-    }
-
-    private int thumbHeight(int total, int visible) {
-        return Math.max(18, bodyH * visible / Math.max(1, total));
-    }
-
-    /** draggable = true ise kalın, tutulabilir bir çubuk çizilir. */
-    private void renderScrollbar(GuiGraphicsExtractor g, int total, int visible, int scroll, boolean draggable) {
-        int maxScroll = Math.max(0, total - visible);
-        if (maxScroll <= 0) return;
-
-        int barH = thumbHeight(total, visible);
-        int barY = bodyY + (bodyH - barH) * scroll / maxScroll;
-
-        if (!draggable) {
-            Draw.rect(g, x + w - 3, barY, 2, barH, Theme.STROKE);
-            return;
-        }
-
-        Draw.roundRect(g, barX(), bodyY, BAR_W, bodyH, Theme.INSET);
-        Draw.roundRect(g, barX(), barY, BAR_W, barH, draggingLogBar ? Theme.ACCENT : Theme.HOVER);
-    }
 
     private int segX(int index) {
         return x + index * segW;
