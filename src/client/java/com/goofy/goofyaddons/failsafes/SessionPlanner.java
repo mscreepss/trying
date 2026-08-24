@@ -49,7 +49,7 @@ public class SessionPlanner implements Failsafe {
 
         if (!config.sessionPlannerEnabled) {
             // Kapalıyken mola içinde kalmayalım - kullanıcı ortasında kapatabilir.
-            if (phase == Phase.BREAK) resumeNow("planlayici kapatildi");
+            if (phase == Phase.BREAK) resumeNow("planner disabled");
             phaseStartMs = 0;
             lastTickMs = now;
             return;
@@ -69,13 +69,13 @@ public class SessionPlanner implements Failsafe {
             phaseStartMs = now;
             phaseLengthMs = minutesToMs(config.breakMinMinutes, config.breakMaxMinutes);
             FeatureManager.INSTANCE.pause();
-            String text = "mola basladi - " + (phaseLengthMs / 60000) + " dk";
+            String text = "break started - " + (phaseLengthMs / 60000) + " min";
             ChatUtils.clientMessage("SessionPlanner: " + text);
             ActionLog.add(ActionLog.Tag.SESSION, text);
             return;
         }
 
-        resumeNow("mola bitti - calismaya devam");
+        resumeNow("break over - back to work");
         startWork(now);
     }
 
@@ -92,7 +92,7 @@ public class SessionPlanner implements Failsafe {
         phaseStartMs = now;
         phaseLengthMs = minutesToMs(config.workMinMinutes, config.workMaxMinutes);
         ActionLog.add(ActionLog.Tag.SESSION,
-                "calisma turu basladi - " + (phaseLengthMs / 60000) + " dk");
+                "work block started - " + (phaseLengthMs / 60000) + " min");
     }
 
     private long minutesToMs(int minMinutes, int maxMinutes) {
@@ -108,13 +108,13 @@ public class SessionPlanner implements Failsafe {
     /** Arayüzde gösterilecek durum satırı. */
     public String statusLine() {
         GoofyConfig config = GoofyConfig.INSTANCE;
-        if (config == null || !config.sessionPlannerEnabled) return "kapali";
-        if (phaseStartMs == 0) return "makro baslayinca devreye girer";
+        if (config == null || !config.sessionPlannerEnabled) return "off";
+        if (phaseStartMs == 0) return "starts when the macro starts";
 
         long remaining = Math.max(0, phaseLengthMs - (System.currentTimeMillis() - phaseStartMs));
         long minutes = remaining / 60000;
         long seconds = (remaining % 60000) / 1000;
-        String label = phase == Phase.WORK ? "calisiyor" : "molada";
-        return label + " - kalan " + minutes + "dk " + String.format("%02d", seconds) + "sn";
+        String label = phase == Phase.WORK ? "working" : "on break";
+        return label + " - " + minutes + "m " + String.format("%02d", seconds) + "s left";
     }
 }
