@@ -15,13 +15,12 @@ import org.lwjgl.glfw.GLFW;
  */
 public enum KeyAction {
 
-    MENU("Menu", "GoofyAddons arayuzunu acar", GLFW.GLFW_KEY_M),
-    START("Start", "Makroyu sifirdan baslatir", -1),
-    PAUSE_RESUME("Pause / Resume", "Oldugu yerde dondurur, ayni noktadan devam eder", -1),
-    STOP("Stop", "Makroyu tamamen durdurur ve gorevleri temizler", -1),
-    RELOAD_CONFIG("Reload Config", "Config dosyasini diskten yeniden okur", -1),
-    MOVE_HUD("Move HUD", "HUD'u surukle-birak ile tasima moduna girer", -1),
-    HUD_MODE("HUD Mode", "HUD'da All-time / Session arasinda gecis yapar", GLFW.GLFW_KEY_V);
+    MENU("Menu", "Open / close the GoofyAddons menu", GLFW.GLFW_KEY_M),
+    START("Start", "Start the macro from scratch", -1),
+    PAUSE_RESUME("Pause / Resume", "Freeze in place, continue from the same point", -1),
+    STOP("Stop", "Stop the macro and clear all tasks", -1),
+    RELOAD_CONFIG("Reload Config", "Re-read the config file from disk", -1),
+    HUD_MODE("HUD Mode", "Switch the Profit HUD between All-time / Session", GLFW.GLFW_KEY_V);
 
     private final String title;
     private final String description;
@@ -53,7 +52,6 @@ public enum KeyAction {
             case PAUSE_RESUME -> k.pauseResume;
             case STOP -> k.stop;
             case RELOAD_CONFIG -> k.reloadConfig;
-            case MOVE_HUD -> k.moveHud;
             case HUD_MODE -> k.hudMode;
         };
     }
@@ -66,7 +64,6 @@ public enum KeyAction {
             case PAUSE_RESUME -> k.pauseResume = code;
             case STOP -> k.stop = code;
             case RELOAD_CONFIG -> k.reloadConfig = code;
-            case MOVE_HUD -> k.moveHud = code;
             case HUD_MODE -> k.hudMode = code;
         }
         GoofyConfig.save();
@@ -78,13 +75,13 @@ public enum KeyAction {
         return GoofyConfig.INSTANCE.keys;
     }
 
-    /** Tuşun ekranda görünecek adı. Atanmamışsa "-". */
+    /** Tuşun ekranda görünecek adı. Atanmamışsa "None". */
     public String keyName() {
         return keyName(getKey());
     }
 
     public static String keyName(int code) {
-        if (code < 0) return "-";
+        if (code < 0) return "None";
         if (code == GLFW.GLFW_KEY_SPACE) return "SPACE";
 
         String glfwName = GLFW.glfwGetKeyName(code, 0);
