@@ -24,9 +24,9 @@ import java.util.Map;
 public class StatsTab {
 
     private enum Section {
-        HISTORY("Gecmis"),
-        LOG("Canli Log"),
-        BOOKS("Kitap");
+        HISTORY("History"),
+        LOG("Live Log"),
+        BOOKS("Per Book");
 
         final String title;
 
@@ -39,10 +39,10 @@ public class StatsTab {
     private static Section activeSection = Section.HISTORY;
     private static boolean booksShowSession = true;
 
-    private static final int SEG_H = 20;
-    private static final int HISTORY_ROW_H = 30;
-    private static final int LOG_ROW_H = 11;
-    private static final int BOOK_ROW_H = 26;
+    private static final int SEG_H = 22;
+    private static final int HISTORY_ROW_H = 34;
+    private static final int LOG_ROW_H = 12;
+    private static final int BOOK_ROW_H = 30;
 
     private int x, y, w, h;
     private int segW;
@@ -60,14 +60,14 @@ public class StatsTab {
         this.h = h;
         this.segW = w / Section.values().length;
 
-        this.bodyY = y + SEG_H + 12;
+        this.bodyY = y + SEG_H + 16;
         this.bodyH = Math.max(30, (y + h) - bodyY);
 
         // Session / Total ikilisi Kitap bölümünün kendi başlık satırında durur.
-        this.scopeW = 58;
-        this.scopeH = 14;
+        this.scopeW = 64;
+        this.scopeH = 15;
         this.scopeX = x + w - scopeW * 2 - 4;
-        this.scopeY = y + SEG_H + (12 - scopeH) / 2 - 1;
+        this.scopeY = y + SEG_H + 1;
     }
 
     // =====================================================================
@@ -111,13 +111,13 @@ public class StatsTab {
     private void renderHistory(GuiGraphicsExtractor g, int mouseX, int mouseY) {
         List<TradeRecord> records = TradeHistory.records();
 
-        Draw.text(g, records.size() + " tamamlanan hat", x, y + SEG_H + 2, Theme.TEXT_FAINT);
-        Draw.textRight(g, "sure = ilk buy order -> sell order acilisi", x + w, y + SEG_H + 2, Theme.TEXT_FAINT);
+        Draw.text(g, records.size() + " completed lines", x, y + SEG_H + 2, Theme.TEXT_FAINT);
+        Draw.textRight(g, "duration = first buy order -> sell order placed", x + w, y + SEG_H + 2, Theme.TEXT_FAINT);
 
         Draw.panel(g, x, bodyY, w, bodyH, Theme.CARD, Theme.STROKE);
 
         if (records.isEmpty()) {
-            Draw.textCentered(g, "Henuz tamamlanan hat yok", x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
+            Draw.textCentered(g, "No completed lines yet", x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
             return;
         }
 
@@ -138,18 +138,18 @@ public class StatsTab {
             Draw.textRight(g, "outbid " + record.outbidCount + "   -   " + duration(record.durationMs()),
                     x + w - 8, ry + 3, Theme.TEXT_DIM);
 
-            Draw.text(g, "Spend", x + 10, ry + 15, Theme.TEXT_FAINT);
-            Draw.text(g, coins(record.spend), x + 10 + Draw.textWidth("Spend") + 6, ry + 15, Theme.TEXT);
+            Draw.text(g, "Spend", x + 12, ry + 17, Theme.TEXT_FAINT);
+            Draw.text(g, coins(record.spend), x + 12 + Draw.textWidth("Spend") + 8, ry + 17, Theme.TEXT);
 
             String cleanLabel = "Clean Profit";
             if (record.revenuePending) {
-                Draw.textRight(g, cleanLabel + "  satis bekleniyor...", x + w - 8, ry + 15, Theme.TEXT_FAINT);
+                Draw.textRight(g, cleanLabel + "  waiting for sale", x + w - 10, ry + 17, Theme.TEXT_FAINT);
             } else {
                 double clean = record.cleanProfit();
                 String value = (clean >= 0 ? "+" : "-") + coins(Math.abs(clean));
                 int color = clean >= 0 ? Theme.GREEN : Theme.RED;
-                Draw.textRight(g, value, x + w - 8, ry + 15, color);
-                Draw.textRight(g, cleanLabel, x + w - 8 - Draw.textWidth(value) - 6, ry + 15, Theme.TEXT_FAINT);
+                Draw.textRight(g, value, x + w - 10, ry + 17, color);
+                Draw.textRight(g, cleanLabel, x + w - 10 - Draw.textWidth(value) - 8, ry + 17, Theme.TEXT_FAINT);
             }
 
             if (i + 1 < visible && (i + historyScroll + 1) < records.size()) {
@@ -165,13 +165,13 @@ public class StatsTab {
     private void renderLog(GuiGraphicsExtractor g, int mouseX, int mouseY) {
         List<ActionLog.Entry> lines = ActionLog.snapshot();
 
-        Draw.text(g, "son " + lines.size() + " aksiyon", x, y + SEG_H + 2, Theme.TEXT_FAINT);
-        Draw.textRight(g, "en yeni ustte", x + w, y + SEG_H + 2, Theme.TEXT_FAINT);
+        Draw.text(g, "last " + lines.size() + " actions", x, y + SEG_H + 2, Theme.TEXT_FAINT);
+        Draw.textRight(g, "newest first", x + w, y + SEG_H + 2, Theme.TEXT_FAINT);
 
         Draw.panel(g, x, bodyY, w, bodyH, Theme.CARD, Theme.STROKE);
 
         if (lines.isEmpty()) {
-            Draw.textCentered(g, "Henuz aksiyon yok", x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
+            Draw.textCentered(g, "No actions yet", x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
             return;
         }
 
@@ -221,7 +221,7 @@ public class StatsTab {
                 ? TradeHistory.sessionStats()
                 : TradeHistory.totalStats();
 
-        Draw.text(g, booksShowSession ? "bu oturum" : "tum zamanlar", x, y + SEG_H + 2, Theme.TEXT_FAINT);
+        Draw.text(g, booksShowSession ? "this session" : "all time", x, y + SEG_H + 2, Theme.TEXT_FAINT);
         renderScopeToggle(g, mouseX, mouseY);
 
         Draw.panel(g, x, bodyY, w, bodyH, Theme.CARD, Theme.STROKE);
@@ -229,8 +229,8 @@ public class StatsTab {
         List<String> names = new ArrayList<>(stats.keySet());
         if (names.isEmpty()) {
             Draw.textCentered(g, booksShowSession
-                            ? "Bu oturumda henuz islem yok"
-                            : "Henuz kayitli islem yok",
+                            ? "Nothing traded this session"
+                            : "Nothing recorded yet",
                     x + w / 2, bodyY + bodyH / 2 - 4, Theme.TEXT_FAINT);
             return;
         }
@@ -249,7 +249,7 @@ public class StatsTab {
             Draw.rect(g, x + 1, ry + 4, 2, BOOK_ROW_H - 10, Theme.ACCENT_SOFT);
 
             Draw.text(g, Draw.clip(name, w / 2), x + 10, ry + 2, Theme.TEXT);
-            Draw.textRight(g, "alim " + stat.bought + "   satim " + stat.sold,
+            Draw.textRight(g, "bought " + stat.bought + "    sold " + stat.sold,
                     x + w - 8, ry + 2, Theme.TEXT_DIM);
 
             int col = x + 10;
@@ -378,9 +378,9 @@ public class StatsTab {
         long hours = seconds / 3600;
         long minutes = (seconds % 3600) / 60;
         long secs = seconds % 60;
-        if (hours > 0) return hours + "sa " + minutes + "dk";
-        if (minutes > 0) return minutes + "dk " + String.format("%02d", secs) + "sn";
-        return secs + "sn";
+        if (hours > 0) return hours + "h " + minutes + "m";
+        if (minutes > 0) return minutes + "m " + String.format("%02d", secs) + "s";
+        return secs + "s";
     }
 
     private static String roman(int level) {

@@ -17,8 +17,8 @@ import java.util.List;
  */
 public class SessionTab {
 
-    private static final int ROW_H = 24;
-    private static final int BOX_W = 46;
+    private static final int ROW_H = 30;
+    private static final int BOX_W = 56;
 
     private int x, y, w, h;
     private int cardY, cardH;
@@ -36,8 +36,8 @@ public class SessionTab {
         this.h = h;
 
         cardY = y;
-        cardH = 56;
-        rowsY = cardY + cardH + 18;
+        cardH = 62;
+        rowsY = cardY + cardH + 26;
         fieldRightX = x + w;
 
         build();
@@ -49,7 +49,7 @@ public class SessionTab {
         if (config == null) return;
 
         enabledToggle = new Widgets.Toggle(config.sessionPlannerEnabled);
-        enabledToggle.bounds(x + w - 12 - enabledToggle.w, cardY + 13);
+        enabledToggle.bounds(x + w - 14 - enabledToggle.w, cardY + 16);
         enabledToggle.onChange = () -> {
             config.sessionPlannerEnabled = enabledToggle.value;
             GoofyConfig.save();
@@ -74,12 +74,12 @@ public class SessionTab {
 
         int pairRight = fieldRightX;
         int maxX = pairRight - BOX_W;
-        int minX = maxX - 14 - BOX_W;
+        int minX = maxX - 16 - BOX_W;
 
-        workMinBox.bounds(minX, rowsY + 2, BOX_W, 16);
-        workMaxBox.bounds(maxX, rowsY + 2, BOX_W, 16);
-        breakMinBox.bounds(minX, rowsY + ROW_H + 2, BOX_W, 16);
-        breakMaxBox.bounds(maxX, rowsY + ROW_H + 2, BOX_W, 16);
+        workMinBox.bounds(minX, rowsY + (ROW_H - 18) / 2, BOX_W, 18);
+        workMaxBox.bounds(maxX, rowsY + (ROW_H - 18) / 2, BOX_W, 18);
+        breakMinBox.bounds(minX, rowsY + ROW_H + (ROW_H - 18) / 2, BOX_W, 18);
+        breakMaxBox.bounds(maxX, rowsY + ROW_H + (ROW_H - 18) / 2, BOX_W, 18);
 
         boxes.add(workMinBox);
         boxes.add(workMaxBox);
@@ -125,62 +125,62 @@ public class SessionTab {
     public void render(GuiGraphicsExtractor g, int mouseX, int mouseY) {
         GoofyConfig config = GoofyConfig.INSTANCE;
         if (config == null || enabledToggle == null) {
-            Draw.textCentered(g, "Config yuklenemedi", x + w / 2, y + 40, Theme.RED);
+            Draw.textCentered(g, "Config could not be loaded", x + w / 2, y + 40, Theme.RED);
             return;
         }
 
         // --- durum kartı ---
         Draw.panel(g, x, cardY, w, cardH, Theme.CARD, Theme.STROKE);
 
-        Draw.text(g, "Session Planlayici", x + 12, cardY + 11, Theme.TEXT);
+        Draw.text(g, "Session Planner", x + 14, cardY + 14, Theme.TEXT);
         String beta = "BETA";
-        int betaX = x + 12 + Draw.textWidth("Session Planlayici") + 8;
-        Draw.badge(g, beta, betaX, cardY + 9, Theme.YELLOW, Theme.YELLOW_SOFT);
+        int betaX = x + 14 + Draw.textWidth("Session Planner") + 10;
+        Draw.badge(g, beta, betaX, cardY + 12, Theme.YELLOW, Theme.YELLOW_SOFT);
 
         enabledToggle.render(g, mouseX, mouseY);
 
-        Draw.text(g, "Makro belirli araliklarla kendi kendine mola verir,",
-                x + 12, cardY + 26, Theme.TEXT_FAINT);
-        Draw.text(g, "sonra kaldigi yerden devam eder.",
-                x + 12, cardY + 36, Theme.TEXT_FAINT);
+        Draw.text(g, "The macro takes its own breaks at random intervals",
+                x + 14, cardY + 30, Theme.TEXT_FAINT);
+        Draw.text(g, "and then continues from where it left off.",
+                x + 14, cardY + 42, Theme.TEXT_FAINT);
 
         String status = FailsafeManager.INSTANCE.getSessionPlanner().statusLine();
-        Draw.textRight(g, status, x + w - 12, cardY + 36,
+        Draw.textRight(g, status, x + w - 14, cardY + 42,
                 config.sessionPlannerEnabled ? Theme.ACCENT : Theme.TEXT_FAINT);
 
         // --- süre satırları ---
-        Draw.text(g, "SURELER (dakika)", x, rowsY - 14, Theme.TEXT_FAINT);
-        Draw.hLine(g, x, rowsY - 3, w, Theme.STROKE);
+        Draw.text(g, "DURATIONS (minutes)", x, rowsY - 16, Theme.TEXT_FAINT);
+        Draw.hLine(g, x, rowsY - 5, w, Theme.STROKE);
 
-        row(g, mouseX, mouseY, 0, "Calisma suresi", "her turda bu aralikta rastgele");
-        row(g, mouseX, mouseY, 1, "Mola suresi", "her molada bu aralikta rastgele");
+        row(g, mouseX, mouseY, 0, "Work time", "random within this range each round");
+        row(g, mouseX, mouseY, 1, "Break time", "random within this range each break");
 
         for (Widgets.TextBox box : boxes) box.render(g, mouseX, mouseY);
 
         // "min - max" arasindaki tire
-        int dashX = workMinBox.x + workMinBox.w + 4;
-        Draw.text(g, "-", dashX, rowsY + 6, Theme.TEXT_FAINT);
-        Draw.text(g, "-", dashX, rowsY + ROW_H + 6, Theme.TEXT_FAINT);
+        int dashX = workMinBox.x + workMinBox.w + 5;
+        Draw.text(g, "-", dashX, rowsY + 9, Theme.TEXT_FAINT);
+        Draw.text(g, "-", dashX, rowsY + ROW_H + 9, Theme.TEXT_FAINT);
 
         // --- alt not ---
-        int noteY = rowsY + ROW_H * 2 + 14;
-        Draw.text(g, "NOT", x, noteY, Theme.TEXT_FAINT);
+        int noteY = rowsY + ROW_H * 2 + 22;
+        Draw.text(g, "NOTE", x, noteY, Theme.TEXT_FAINT);
         Draw.hLine(g, x, noteY + 11, w, Theme.STROKE);
-        Draw.text(g, "Mola sirasinda gorevler ve sayaclar silinmez; makro tam",
-                x, noteY + 18, Theme.TEXT_DIM);
-        Draw.text(g, "kaldigi noktadan devam eder. Elle duraklattiysan (Pause)",
-                x, noteY + 28, Theme.TEXT_DIM);
-        Draw.text(g, "planlayici seni ezmez, makro duraklatilmis kalir.",
-                x, noteY + 38, Theme.TEXT_DIM);
+        Draw.text(g, "Tasks and counters are kept during a break - the macro",
+                x, noteY + 19, Theme.TEXT_DIM);
+        Draw.text(g, "resumes exactly where it stopped. If you paused it by hand,",
+                x, noteY + 31, Theme.TEXT_DIM);
+        Draw.text(g, "the planner will not override you - it stays paused.",
+                x, noteY + 43, Theme.TEXT_DIM);
     }
 
     private void row(GuiGraphicsExtractor g, int mouseX, int mouseY, int index, String title, String hint) {
         int ry = rowsY + index * ROW_H;
         if (Draw.inside(mouseX, mouseY, x, ry, w, ROW_H)) {
-            Draw.rect(g, x - 4, ry, w + 8, ROW_H, Theme.CARD);
+            Draw.rect(g, x - 6, ry, w + 12, ROW_H, Theme.CARD);
         }
-        Draw.text(g, title, x, ry + 6, Theme.TEXT);
-        Draw.text(g, hint, x + Draw.textWidth(title) + 8, ry + 6, Theme.TEXT_FAINT);
+        Draw.text(g, title, x, ry + 9, Theme.TEXT);
+        Draw.text(g, hint, x + Draw.textWidth(title) + 10, ry + 9, Theme.TEXT_FAINT);
         if (index == 0) Draw.hLine(g, x, ry + ROW_H - 1, w, Theme.STROKE);
     }
 
