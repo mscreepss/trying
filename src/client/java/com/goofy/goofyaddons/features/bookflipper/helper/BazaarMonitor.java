@@ -64,6 +64,23 @@ public class BazaarMonitor {
         monitorItemList.clear();
     }
 
+    /** Su an izlenen SATIS emirlerinin kitaplari. */
+    public List<Book> sellBooks() {
+        List<Book> out = new ArrayList<>();
+        for (BazaarMonitorItem item : monitorItemList) {
+            if (item.isSellOrder) out.add(item.book);
+        }
+        return out;
+    }
+
+    /** Bu kitabin izlenen SATIS fiyati, ya da izlenmiyorsa -1. */
+    public double watchedSellPrice(Book book) {
+        for (BazaarMonitorItem item : monitorItemList) {
+            if (item.isSellOrder && item.book.equals(book)) return item.price;
+        }
+        return -1;
+    }
+
     public void hook(Consumer<Book> hook) {
         hookList.add(hook);
     }
@@ -157,10 +174,21 @@ public class BazaarMonitor {
             }
         } else {
             JsonObject entry = productID.getAsJsonArray("buy_summary").get(0).getAsJsonObject();
-            int orders = entry.get("orders").getAsInt();
-            double price = entry.get("pricePerUnit").getAsDouble();
+            double best = entry.get("pricePerUnit").getAsDouble();
 
-            if (orders > 1 || price != bazaarMonitorItem.price) {
+            // SATIS TARAFI: alim tarafiyla ayni kural KULLANILAMAZ.
+            //
+            // "orders > 1" satista neredeyse her zaman dogrudur - listede senden
+            // baska satici olmasi normaldir, outbid demek degildir. Ayrica GUI'den
+            // okudugumuz fiyat yuvarlanmis, API'deki double ise tam; "price !=
+            // bizim fiyat" da hemen hemen her turda tutar. Ikisi birlestiginde
+            // makro her yeni listeden 15 saniye sonra kendi saglikli emrini
+            // iptal edip yeniden aciyordu.
+            //
+            // Satista outbid'in tek gercek tanimi: BIRI SENDEN UCUZA LISTELEDI.
+            // Kucuk fark tolere edilir, yoksa 0.1 coinlik salinim bile tetikler.
+            double tolerance = Math.max(0.5, bazaarMonitorItem.price * 0.001);
+            if (best < bazaarMonitorItem.price - tolerance) {
                 bazaarMonitorItem.setOutbid(true);
                 handleOutbid(bazaarMonitorItem);
             }

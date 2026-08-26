@@ -65,7 +65,12 @@ public class BazaarFlipper implements Feature {
         ANVIL,
         COMBINE,
         SELL,
-        REPLACE_SELL,
+        /**
+         * Outbid yenen bir SATIS emrini iptal edip guncel fiyattan yeniden acar.
+         * Kendi ic adim makinesi var (Relist) - ayni ekran akisin iki farkli
+         * yerinde ciktigi icin "hangi ekran acik" sorusu tek basina yetmiyor.
+         */
+        RELIST,
         /**
          * Acilista bazaar'daki ACIK SATIS EMIRLERINI okuyup izlemeye alir.
          * BazaarMonitor yalnizca makronun kendi actigi emirleri biliyordu;
@@ -110,7 +115,6 @@ public class BazaarFlipper implements Feature {
     private boolean clickedOnce = false;
     private Book activeBook = null;
     private SplittableRandom splittableRandom = new SplittableRandom();
-    private List<String> sellOrderName = new ArrayList<>();
     private boolean notEnoughCash = false;
     private boolean isInventoryFull = false;
     private boolean didRemoveOrder = false;
@@ -162,7 +166,6 @@ public class BazaarFlipper implements Feature {
     private int lastOrderAmount = 0;
     /** Satisa cikarilirken okunan birim fiyat - izlemeye bu fiyatla kaydediliyor. */
     private double pendingSellPrice = 0;
-    /** Satis emri outbid yendi mi? IDLE bunu gorunce REPLACE_SELL'e gecer. */
 
     /** Only Sell: bu baslatmada eldeki stok icin gorevler kuruldu mu? */
     private boolean onlySellSeeded = false;
@@ -185,23 +188,75 @@ public class BazaarFlipper implements Feature {
      * Outbid yenmis SATIS emirlerinin adlari, geldikleri sirayla.
      *
      * NEDEN LISTE: tek bir boolean bayrakti. Ayni anda iki emir outbid yerse
-     * ikincisi sessizce kayboluyordu. Ayrica REPLACE_SELL hangi emri
+     * ikincisi sessizce kayboluyordu. Ayrica yenileme hangi emri
      * duzeltecegini bilemedigi icin listedeki ILK emri iptal ediyordu - saglikli
      * emir bosuna churn ediliyor, outbid yenen hic duzelmiyordu.
      *
      * THREAD: BazaarMonitor'un HTTP thread'i yaziyor, tick thread'i okuyor.
      */
-    private final java.util.concurrent.ConcurrentLinkedQueue<String> pendingSellOutbids =
-            new java.util.concurrent.ConcurrentLinkedQueue<>();
-    /** REPLACE_SELL'in su an duzeltmesi gereken satis emrinin adi. */
-    private String outbidSellName = null;
 
     /**
-     * Outbid yenmis ALIM siparisleri. Satis tarafiyla ayni sebep: BazaarMonitor
-     * HTTP thread'inden haber veriyor, gorev haritasina orada dokunmak
-     * ConcurrentModificationException demek.
+     * RELIST alt adimlari.
+     *
+     * NEDEN AYRI BIR ADIM SAYACI: akista "Manage Orders" ekrani IKI KEZ
+     * geciyor - once emri bulmak icin, sonra iptalden sonra kitabi envanterden
+     * secmek icin. Ekran basligina bakarak hangisinde oldugumuzu ayirt etmek
+     * imkansiz. Ustelik basliklar birbirini kapsiyor: "Your Bazaar Orders"
+     * hem "Bazaar" hem "Order" aramasiyla eslesiyor. Adim burada tutulunca
+     * bu belirsizliklerin hicbiri kalmiyor.
+     */
+    private enum Relist {
+        OPEN_ORDERS,
+        FIND_ORDER,
+        CANCEL,
+        OPEN_PRODUCT,
+        CREATE_OFFER,
+        SET_PRICE,
+        CONFIRM
+    }
+
+    private Relist relistStep = Relist.OPEN_ORDERS;
+    /** Su an emri yenilenen kitap. */
+    private Book relistBook = null;
+    /** O kitabin satis seviyesindeki tam adi ("Ultimate Wise V"). */
+    private String relistName = null;
+    /** Yenilenmeyi bekleyen kitaplar. */
+    private final Deque<Book> relistQueue = new ArrayDeque<>();
+    /** Ayni kitap art arda yenilenmesin diye son yenileme zamani. */
+    private final Map<String, Long> lastRelistMs = new HashMap<>();
+    /** Bu adimda kac tick beklendi - takilirsa vazgecmek icin. */
+    private int relistWaits = 0;
+    /** Iptalden ONCE envanterde bu kitaptan kac tane vardi. */
+    private int relistInvBefore = 0;
+    /** Bu kitabin emri IPTAL EDILDI mi? (edildiyse asla yarim birakilmaz) */
+    private boolean relistCancelled = false;
+    /** Emri ekranda kac kez aradik? (bos ekrandan sonuc cikarmamak icin) */
+    private int relistFindTries = 0;
+    /** Bu kitap icin kac kez bastan denendi. */
+    private int relistRetries = 0;
+
+    private static final int RELIST_MAX_RETRIES = 3;
+    /** Kuyrukta bundan uzun bekleyen outbid uyarisi bayat sayilir. */
+    private static final long RELIST_STALE_MS = 10 * 60_000;
+    /** Her kuyruk girdisinin eklendigi an (satis adina gore). */
+    private final Map<String, Long> relistQueuedMs = new HashMap<>();
+
+    /** Ayni satis emri en fazla bu araliktan sik yenilenmez. */
+    private static final long RELIST_COOLDOWN_MS = 60_000;
+    /** Bir adimda bu kadar tick bekledikten sonra pes edilir. */
+    private static final int RELIST_MAX_WAITS = 300;
+
+
+    /**
+     * Outbid yenmis ALIM siparisleri. BazaarMonitor HTTP thread'inden haber
+     * veriyor; gorev haritasina orada dokunmak ConcurrentModificationException
+     * demek, o yuzden once kuyruga yazilir, tick thread'i isler.
      */
     private final java.util.concurrent.ConcurrentLinkedQueue<Book> pendingBuyOutbids =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /** Outbid yenmis SATIS emirleri - ayni sebeple thread-safe kuyruk. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<Book> pendingSellOutbidBooks =
             new java.util.concurrent.ConcurrentLinkedQueue<>();
     private int outbidClaimedAmount = 0;
     private int storedThisVisit = 0;
@@ -243,12 +298,18 @@ public class BazaarFlipper implements Feature {
         pendingStoreAddress = -1;
         storeSnapshot.clear();
         storeFullPages.clear();
+        relistQueue.clear();
+        relistQueuedMs.clear();
+        pendingSellOutbidBooks.clear();
+        lastRelistMs.clear();
+        relistBook = null;
+        relistName = null;
+        relistStep = Relist.OPEN_ORDERS;
+        relistWaits = 0;
         onlySellSeeded = false;
         sellScanDone = false;
         sellScanAttempts = 0;
         sellScanClicks = 0;
-        pendingSellOutbids.clear();
-        outbidSellName = null;
         enabled = true;
         state = State.START;
         stateEnteredMs = System.currentTimeMillis();
@@ -284,6 +345,13 @@ public class BazaarFlipper implements Feature {
         pendingStoreAddress = -1;
         storeSnapshot.clear();
         storeFullPages.clear();
+        relistQueue.clear();
+        relistQueuedMs.clear();
+        pendingSellOutbidBooks.clear();
+        relistBook = null;
+        relistName = null;
+        relistStep = Relist.OPEN_ORDERS;
+        relistWaits = 0;
         enabled = false;
         state = State.IDLE;
         lastState = null;
@@ -308,8 +376,6 @@ public class BazaarFlipper implements Feature {
         sellScanDone = false;
         sellScanAttempts = 0;
         sellScanClicks = 0;
-        pendingSellOutbids.clear();
-        outbidSellName = null;
         pendingSellPrice = 0;
         OnlySellMode.setPhase(OnlySellMode.Phase.OFF);
         Humanizer.reset();
@@ -343,6 +409,7 @@ public class BazaarFlipper implements Feature {
         // Outbid haberleri HTTP thread'inden kuyruga dusuyor; gorev haritasina
         // yalnizca burada, tick thread'inde dokunuluyor.
         drainBuyOutbids();
+        drainSellOutbids();
         updateOnlySellPhase();
         lastStateCheck();
         watchdog();
@@ -459,15 +526,31 @@ public class BazaarFlipper implements Feature {
                     debug("Starting clock");
                     clock.start(60000);
                     if (clock.shouldFire()) {
-                        debug("1 Minute clock ended, switching to REPLACE_SELL");
-                        state = State.REPLACE_SELL;
+                        // Para yok, gorev de yok: acik satis emirlerini guncel
+                        // fiyattan yeniden listele ki dolsunlar. Eskiden bunu
+                        // REPLACE_SELL yapiyordu ama o state hedefi kaybedince
+                        // listedeki ILK emri iptal ediyordu - elle acilmis
+                        // alakasiz bir emri bile. Artik dogrulanmis RELIST akisi
+                        // kullaniliyor ve her emir adiyla hedefleniyor.
+                        List<Book> watched = bazaarMonitor.sellBooks();
+                        if (watched.isEmpty()) {
+                            debug("yeniden listelenecek satis emri yok");
+                            notEnoughCash = false;
+                            return;
+                        }
+                        for (Book book : watched) queueRelist(book);
+                        if (!relistQueue.isEmpty()) {
+                            ActionLog.add(ActionLog.Tag.SELL,
+                                    "not enough coins - relisting " + relistQueue.size() + " sell order(s)");
+                            state = State.RELIST;
+                        }
                     }
                     return;
                 }
 
                 // ONLY SELL: alim tarafi tamamen bittiyse ve satis emrimiz
                 // outbid yendiyse, acik satislari guncel fiyattan yeniden
-                // listelemek icin REPLACE_SELL'e gec.
+                // listelemek icin RELIST'e gec.
                 // Acilis taramasi yarim kaldiysa (RECOVERY, ekran acilmadi, sunucu
                 // gecikti) burada tekrar denenir. Uc denemeden sonra pes edilir -
                 // aksi halde SELL_SCAN -> zaman asimi -> RECOVERY -> IDLE -> SELL_SCAN
@@ -494,13 +577,10 @@ public class BazaarFlipper implements Feature {
                 // vardi ve "bayrak = kuyruk bos mu" atamasi tick thread'inde,
                 // add() ise HTTP thread'inde calisiyordu: tam arada gelen bir
                 // outbid bayragi sifirlatip kuyrukta unutuluyordu.
-                if (!pendingSellOutbids.isEmpty() && OnlySellMode.sellOutbidActive()) {
-                    outbidSellName = pendingSellOutbids.poll();
-                    sellOrderName.clear();
-                    ActionLog.add(ActionLog.Tag.SELL, (outbidSellName == null ? "a sell order" : outbidSellName)
-                            + " was outbid - relisting at the current price");
-                    ChatUtils.clientMessage("Sell order was outbid - relisting.");
-                    state = State.REPLACE_SELL;
+                // SATIS NOBETI: tum hatlar bittiyse (SELL_ONLY) ve yenilenmesi
+                // gereken bir satis emri varsa RELIST devreye girer.
+                if (OnlySellMode.sellOutbidActive() && !relistQueue.isEmpty()) {
+                                state = State.RELIST;
                     return;
                 }
 
@@ -1144,6 +1224,20 @@ public class BazaarFlipper implements Feature {
                                 return;
                             }
 
+                            if (OnlySellMode.blocksNewOrders()) {
+                                // ONLY SELL'DE ALIM YOK. Bu dal SELECTED'a
+                                // donduruyor, IDLE de SELECTED'i siparise
+                                // yolluyor - yani "hicbir sey alma" modu gercek
+                                // parayla alim yapardi. Kitaplar defterde kaliyor,
+                                // mod kapatilinca hat kaldigi yerden devam eder.
+                                ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik ("
+                                        + missing + " birim) - Only Sell acik, alim yapilmiyor.");
+                                ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
+                                        + ": pool short by " + missing + ", only sell - line parked");
+                                task.remove(bookToHandle);
+                                return;
+                            }
+
                             ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik: "
                                     + missing + " birim tamamlama siparisi aciliyor.");
                             ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
@@ -1307,7 +1401,38 @@ public class BazaarFlipper implements Feature {
                     // anlami yok: elde kalan varsa defterde duruyor ve makroyu
                     // yeniden baslatinca STARTUP_CHECK onu bulup yeni tur baslatir.
                     if (soldTask != null && OnlySellMode.isEnabled()) {
-                        ActionLog.add(ActionLog.Tag.SELL, soldBook.name() + ": only sell line finished");
+                        // Satilanlar elimizden cikti; elde HALA kitap var mi bak.
+                        // Bakmadan kapatirsak (32'lik iki setlik havuzda oldugu
+                        // gibi) kalan kitaplar sahipsiz kalirdi.
+                        // KARDES HATLARI ONCE HALLET. Eskiden soldBook'un elinde
+                        // kitap kalinca erken donuluyordu ve ayni satis emrini
+                        // paylasan kardes hat (2to5) SELL durumunda ASILI
+                        // kaliyordu: elinde satilacak kitap yokken SELL state'i
+                        // onu tekrar tekrar islemeye calisiyor, watchdog makroyu
+                        // durduruyordu. Ustelik gorev listesi hic bosalmadigi icin
+                        // SELL_ONLY fazina da asla gecilmiyor, yani satis nobeti
+                        // hic devreye girmiyordu.
+                        for (Book sameName : booksInState(BookState.SELL)) {
+                            if (!sameName.name().equals(soldBook.name())) continue;
+                            if (sameName.equals(soldBook)) continue;
+                            registerCombineLeftovers(sameName);
+                            if (heldUnits(sameName) > 0) {
+                                editStateBook(sameName, BookState.ANVIL);
+                            } else {
+                                dropLine(sameName);
+                            }
+                        }
+
+                        registerCombineLeftovers(soldBook);
+                        if (heldUnits(soldBook) > 0) {
+                            debug("only sell: " + soldBook.name() + " elde " + heldUnits(soldBook)
+                                    + " birim kaldi, zincire devam");
+                            editStateBook(soldBook, BookState.ANVIL);
+                            return;
+                        }
+
+                        ActionLog.add(ActionLog.Tag.SELL, soldBook.name()
+                                + ": only sell line finished - not reopening");
 
                         // AYNI ISIMDEKI TUM SELL GOREVLERI birlikte kapanir.
                         // removeDuplicateBooks'a guvenemeyiz: o metot
@@ -1317,10 +1442,6 @@ public class BazaarFlipper implements Feature {
                         // hicbiri silinmez. Kardes hat (or. 2to5) SELL'de asili
                         // kalir, elinde kitap yokken kendi satis emrini iptal edip
                         // yeniden acar ya da "havuz eksik kaldi" diye dusulur.
-                        for (Book sameName : booksInState(BookState.SELL)) {
-                            if (!sameName.name().equals(soldBook.name())) continue;
-                            dropLine(sameName);
-                        }
                         dropLine(soldBook);
                         return;
                     }
@@ -1349,7 +1470,7 @@ public class BazaarFlipper implements Feature {
             /*
              * Acilista BIR KEZ calisir: bazaar > Manage Orders ekranini acar,
              * oradaki SELL satirlarini okur ve her birini BazaarMonitor'e satis
-             * emri olarak kaydeder. REPLACE_SELL ile birebir ayni navigasyon
+             * emri olarak kaydeder. RELIST ile birebir ayni navigasyon
              * (tomato bazaar -> slot 50), fark su ki burada hicbir sey iptal
              * edilmez; sadece okuma yapilir.
              */
@@ -1393,113 +1514,263 @@ public class BazaarFlipper implements Feature {
                 }
             }
 
-            case REPLACE_SELL -> {
-                if (!isContainerOpen()) clock.start(randomizer());
-                if (!isContainerOpen() && clock.shouldFire()) {
-                    debug("no container, opening bazaar for tomato");
-                    openBazaar("tomato");
+            /*
+             * SATIS EMRI YENILEME.
+             *
+             * Bir satis emri outbid yendiginde: emri bul, iptal et (kitaplar
+             * envantere doner), urun sayfasini ac, guncel fiyattan yeniden
+             * listele, yeni fiyati izlemeye al.
+             *
+             * TEK EMRE DOKUNUR. Silinen REPLACE_SELL'deki hata buydu: iptalden sonra
+             * siparis ekranina donunce listede BASKA satis emirleri de goruluyor,
+             * "liste bos degil" diye onlari da tek tek iptal ediyordu - yedi
+             * hattin yedi emri de iptal edilip yalnizca biri yeniden aciliyordu.
+             * Burada hedef ADIYLA sabitlenmis durumda ve iptalden sonraki adim
+             * ekrana degil, adim sayacina bakiyor.
+             */
+            case RELIST -> {
+                // Sirada kitap yoksa kuyruktan al.
+                if (relistBook == null) {
+                    Book next = relistQueue.poll();
+                    if (next == null) {
+                        endRelist("kuyruk bos");
+                        return;
+                    }
+                    // BAYAT GIRDI: outbid uyarisi FINISHING fazinda gelip
+                    // saatlerce beklemis olabilir. O kadar eski bir uyariya gore
+                    // saglikli bir emri iptal etmenin anlami yok - emir hala
+                    // outbid'se monitor 15 saniyede bir yeniden haber verir.
+                    Long queuedAt = relistQueuedMs.remove(next.getRomanLevel(next.sellLevel()));
+                    if (queuedAt != null && System.currentTimeMillis() - queuedAt > RELIST_STALE_MS) {
+                        debug("[RELIST] bayat kuyruk girdisi atlandi: " + next.name());
+                        return;
+                    }
+                    relistBook = next;
+                    relistName = next.getRomanLevel(next.sellLevel());
+                    relistStep = Relist.OPEN_ORDERS;
+                    relistWaits = 0;
+                    debug("[RELIST] " + relistName + " icin baslaniyor");
                 }
 
-                if (containerCheck("tomato")) clock.start(randomizer());
-                if (containerCheck("tomato") && clock.shouldFire()) {
-                    debug("tomato bazaar open, clicking slot 50");
-                    click(50, false);
+                // Herhangi bir adimda cok uzun beklediysek birak - yarim kalmis
+                // bir iptal en kotu senaryo, o yuzden asla sessizce donmuyoruz.
+                if (relistWaits++ > RELIST_MAX_WAITS) {
+                    // IPTAL ETTIKTEN SONRA PES ETMEK KITAPLARI OLDURUR.
+                    //
+                    // Emri iptal ettiysek kitaplar envanterde duruyor ve satista
+                    // degiller. Burada vazgecersek onlari bir daha kimse aramaz:
+                    // izleme birakilmis, gorev listesi bos, ve defter taramalari
+                    // sellLevel'i hic gezmiyor. Bu yuzden iptalden sonra HER ZAMAN
+                    // listeleme adimindan yeniden denenir.
+                    relistRetries++;
+                    if (relistRetries <= RELIST_MAX_RETRIES) {
+                        debug("[RELIST] adim " + relistStep + " takildi, yeniden deneniyor ("
+                                + relistRetries + "/" + RELIST_MAX_RETRIES + ")");
+                        relistStep = Relist.OPEN_ORDERS;
+                        relistWaits = 0;
+                        if (isContainerOpen()) minecraft.player.closeContainer();
+                        return;
+                    }
+
+                    if (relistCancelled) {
+                        // Denemeler bitti ama kitaplar hala elde. Kuyrukta birak
+                        // ki soguma suresi sonrasi tekrar denensin - sessizce
+                        // kaybolmasindansa gec listelensin.
+                        ChatUtils.clientMessage(relistName + " yeniden listelenemedi - kitaplar envanterde, "
+                                + "daha sonra yeniden denenecek.");
+                        ActionLog.add(ActionLog.Tag.SELL, relistName
+                                + ": relist failed, books held in inventory - will retry");
+                        Book retry = relistBook;
+                        finishRelistBook();
+                        lastRelistMs.put(relistName == null ? "" : relistName, System.currentTimeMillis());
+                        relistQueue.add(retry);
+                        return;
+                    }
+
+                    ledgerWarn(relistBook, "satis emri yenilenemedi (adim: " + relistStep + ")");
+                    ChatUtils.clientMessage(relistName + " satis emri yenilenemedi - elle kontrol et.");
+                    finishRelistBook();
+                    return;
                 }
 
-                if (containerCheck("Bazaar")) clock.start(randomizer());
-                if (containerCheck("Bazaar") && clock.shouldFire()) {
-                    List<Integer> slots = new ArrayList<>();
+                switch (relistStep) {
 
-                    slots.addAll(inventoryScanner.getSellOrder());
-                    if (slots.isEmpty()) {
-                        List<Integer> slot = new ArrayList<>();
-                        for (String string : sellOrderName) {
-                            slot.addAll(inventoryScanner.findLoreInv(string));
-                        }
-
-                        if (!slot.isEmpty()) {
-                            click(slot.getFirst(), false);
+                    case OPEN_ORDERS -> {
+                        // Beklenmedik bir ekran acik olabilir - ozellikle bir
+                        // onceki kitabin onayindan sonra urun sayfasinda kalmis
+                        // oluruz. Hicbir kosula uymayan ekranda beklersek adim
+                        // zaman asimina kadar takilirdik; kapatip bastan basla.
+                        if (isContainerOpen()
+                                && !containerCheck("tomato")
+                                && !containerCheck("Bazaar")) {
+                            clock.start(randomizer());
+                            if (clock.shouldFire()) {
+                                debug("[RELIST] beklenmedik ekran, kapatiliyor");
+                                minecraft.player.closeContainer();
+                            }
                             return;
                         }
 
-                        // Bayat hedef kalmasin: temizlenmezse notEnoughCash
-                        // yolundan girilen bir sonraki REPLACE_SELL yanlis emri
-                        // hedef alir.
-                        outbidSellName = null;
-                        state = State.FETCHING;
-                        minecraft.player.closeContainer();
-                        return;
-
-                    }
-
-                    // OUTBID YENEN emri sec, listedeki ilkini degil.
-                    //
-                    // ESKI DAVRANIS: her zaman slots.getFirst(). Birden fazla acik
-                    // satis emri varsa saglikli olan iptal edilip yeniden aciliyor,
-                    // outbid yenen ise hic duzelmiyordu. Ustelik getSellOrder() adinda
-                    // "SELL" gecen HER urunu dondurdugu icin config'te olmayan alakasiz
-                    // bir emir de iptal edilebiliyordu.
-                    // endsWith, contains DEGIL: "SELL 16x Ultimate Wise VI" adi
-                    // "Ultimate Wise V" ile eslesir ve outbid yenmemis baska bir
-                    // emri (hatta elle acilmis alakasiz bir emri) iptal ederdik.
-                    int chosen = slots.getFirst();
-                    if (outbidSellName != null) {
-                        for (int slot : slots) {
-                            String name = inventoryScanner.getName(slot).replace("SELL ", "").trim();
-                            if (!name.endsWith(outbidSellName)) continue;
-                            chosen = slot;
-                            break;
+                        if (!isContainerOpen()) clock.start(randomizer());
+                        if (!isContainerOpen() && clock.shouldFire()) {
+                            debug("[RELIST] bazaar aciliyor");
+                            openBazaar("tomato");
+                            return;
+                        }
+                        if (containerCheck("tomato")) clock.start(randomizer());
+                        if (containerCheck("tomato") && clock.shouldFire()) {
+                            debug("[RELIST] urun ekrani acik, slot 50 (Manage Orders)");
+                            click(50, false);
+                            return;
+                        }
+                        // Siparis ekrani: basligi "Bazaar" iceriyor ama urun
+                        // ekrani DEGIL. Iki kosul birden aranmazsa urun ekranini
+                        // siparis ekrani sanardik.
+                        if (containerCheck("Bazaar") && !containerCheck("tomato")) {
+                            // Emri zaten iptal ettiysek aramaya gerek yok - emir
+                            // artik yok. Dogrudan kitabi listeleme adimina gec.
+                            relistStep = relistCancelled ? Relist.OPEN_PRODUCT : Relist.FIND_ORDER;
+                            relistWaits = 0;
+                            relistFindTries = 0;
                         }
                     }
 
-                    sellOrderName.add(inventoryScanner.getName(chosen).replace("SELL ", ""));
+                    case FIND_ORDER -> {
+                        if (!(containerCheck("Bazaar") && !containerCheck("tomato"))) return;
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
 
-                    click(chosen, false);
+                        int target = findSellOrderSlot(relistName);
+                        if (target < 0) {
+                            // BOS EKRANDAN SONUC CIKARMA. Ekranin basligi
+                            // geldiginde icerigi henuz gelmemis olabiliyor;
+                            // hemen "emir gitmis" dersek gercekten outbid yenmis
+                            // bir emri sessizce birakiriz. Birkac kez denenir.
+                            if (relistFindTries++ < 3) {
+                                debug("[RELIST] emir henuz gorunmedi, tekrar bakiliyor ("
+                                        + relistFindTries + "/3)");
+                                return;
+                            }
+                            debug("[RELIST] " + relistName + " icin acik emir yok, atlaniyor");
+                            ActionLog.add(ActionLog.Tag.SELL, relistName + ": open order gone, nothing to relist");
+                            bazaarMonitor.finishSell(relistBook);
+                            finishRelistBook();
+                            return;
+                        }
 
-                }
+                        // Iptal edince kitaplar envantere doner - yer yoksa
+                        // kaybolabilirler. Once yer oldugundan emin ol.
+                        // Yer kontrolu EMIR BUYUKLUGUNE gore. Tek bos slot yeter
+                        // demek, 16 kitaplik bir emri iptal edip yarisini
+                        // kaybetmek demek olabilir.
+                        int needed = sellOrderSize(target);
+                        if (inventoryScanner.getEmptyInventorySlots() < needed) {
+                            ChatUtils.clientMessage("Envanter dolu (" + needed + " slot lazim) - "
+                                    + relistName + " satis emri yenilenemiyor. Yer ac.");
+                            ActionLog.add(ActionLog.Tag.SELL, relistName + ": needs " + needed
+                                    + " free slots, relist skipped");
+                            finishRelistBook();
+                            return;
+                        }
 
-                if (containerCheck("Order")) clock.start(randomizer());
-                if (containerCheck("Order") && clock.shouldFire()) {
-                    List<Integer> slot = inventoryScanner.findContainer("Cancel Order");
-                    if (slot.isEmpty()) return;
-                    debug("Order screen open, clicking slot " + slot.getFirst());
-                    click(slot.getFirst(), false);
-                }
+                        // IPTAL ONCESI envanterde bu kitaptan kac tane var?
+                        // OPEN_PRODUCT bu sayinin ARTMASINI bekleyecek. Yoksa
+                        // baska bir sebeple elde duran ayni kitaba, iptal daha
+                        // tamamlanmadan tiklardik.
+                        relistInvBefore = inventoryScanner.findLoreInvAddressed(relistName).size();
 
-                if (!sellOrderName.isEmpty() && containerCheck(sellOrderName.getFirst())) clock.start(randomizer());
-                if (!sellOrderName.isEmpty() && containerCheck(sellOrderName.getFirst()) && clock.shouldFire()) {
-                    debug("book screen open, clicking slot 16");
-                    click(16, false);
-                }
-
-                if (containerCheck("At what price are you selling")) clock.start(randomizer());
-                if (containerCheck("At what price are you selling") && clock.shouldFire()) {
-                    debug("price prompt, clicking slot 12");
-                    pendingSellPrice = inventoryScanner.getUnitPrice(12);
-                    click(12, false);
-                }
-
-                if (containerCheck("Confirm")) clock.start(randomizer());
-                if (containerCheck("Confirm") && clock.shouldFire()) {
-                    debug("confirm prompt, clicking slot 13 and removing " + sellOrderName.getFirst() + " from sell list");
-                    click(13, false);
-
-                    // Yeniden listelenen emri de izlemeye al: bir daha outbid
-                    // yenirse yine yakalayalim.
-                    Book relisted = findBookBySellName(sellOrderName.getFirst());
-                    if (relisted != null && pendingSellPrice > 0) {
-                        bazaarMonitor.add(relisted, pendingSellPrice, true);
+                        debug("[RELIST] emir bulundu, slot " + target
+                                + " tiklaniyor (envanterde simdi " + relistInvBefore + " tane)");
+                        click(target, false);
+                        relistStep = Relist.CANCEL;
+                        relistWaits = 0;
                     }
-                    pendingSellPrice = 0;
 
-                    ActionLog.add(ActionLog.Tag.SELL, sellOrderName.getFirst() + " relisted at the current price");
-                    sellOrderName.clear();
-                    outbidSellName = null;
-                    state = State.FETCHING;
+                    case CANCEL -> {
+                        List<Integer> cancel = inventoryScanner.findContainer("Cancel Order");
+                        if (cancel.isEmpty()) return;   // emir detayi henuz acilmadi
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
 
+                        debug("[RELIST] Cancel Order tiklaniyor");
+                        click(cancel.getFirst(), false);
+                        // Bu andan itibaren kitaplar satista DEGIL. Yenileme
+                        // tamamlanana kadar hicbir yol pes edemez.
+                        relistCancelled = true;
+                        relistStep = Relist.OPEN_PRODUCT;
+                        relistWaits = 0;
+                    }
+
+                    case OPEN_PRODUCT -> {
+                        // EKRAN GUARDI SART: bu adim envanterdeki kitaba tikliyor.
+                        // Bazaar ekrani kapaliyken (ornegin failsafe hub'a isinip
+                        // ekrani kapattiysa) ayni tiklama kitabi imlece ALIR,
+                        // urun sayfasini acmaz - kitap yere dusebilir.
+                        if (!(containerCheck("Bazaar") && !containerCheck("tomato"))) return;
+
+                        // Iptal edildi, kitaplar envanterde. Urun sayfasini acmak
+                        // icin envanterdeki kitaba tiklanir.
+                        List<int[]> hits = inventoryScanner.findLoreInvAddressed(relistName);
+                        // Sadece "var mi" degil, "ARTTI mi" - iptal edilen
+                        // kitaplarin gercekten geldigini boyle biliyoruz.
+                        if (hits.size() <= relistInvBefore) return;
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
+
+                        debug("[RELIST] kitap envanterde, urun sayfasi aciliyor");
+                        click(hits.getFirst()[1], false);
+                        relistStep = Relist.CREATE_OFFER;
+                        relistWaits = 0;
+                    }
+
+                    case CREATE_OFFER -> {
+                        if (!containerCheck(relistBook.name())) return;
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
+
+                        debug("[RELIST] urun sayfasi acik, slot 16 (Sell Offer)");
+                        click(16, false);
+                        relistStep = Relist.SET_PRICE;
+                        relistWaits = 0;
+                    }
+
+                    case SET_PRICE -> {
+                        if (!containerCheck("At what price are you selling")) return;
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
+
+                        // Fiyati TIKLAMADAN ONCE oku: outbid tespiti bu fiyata gore.
+                        pendingSellPrice = inventoryScanner.getUnitPrice(12);
+                        debug("[RELIST] fiyat okundu: " + pendingSellPrice);
+                        click(12, false);
+                        relistStep = Relist.CONFIRM;
+                        relistWaits = 0;
+                    }
+
+                    case CONFIRM -> {
+                        if (!containerCheck("Confirm")) return;
+                        clock.start(randomizer());
+                        if (!clock.shouldFire()) return;
+
+                        debug("[RELIST] onaylaniyor");
+                        click(13, false);
+
+                        if (pendingSellPrice > 0) {
+                            bazaarMonitor.add(relistBook, pendingSellPrice, true);
+                        } else {
+                            // Fiyat okunamadi: 0 ile izlersek her turda "fiyat
+                            // degismis" sanip sonsuz yenileme dongusune girerdik.
+                            bazaarMonitor.finishSell(relistBook);
+                            ledgerWarn(relistBook, "yeni satis fiyati okunamadi, izleme birakildi");
+                        }
+                        pendingSellPrice = 0;
+
+                        ActionLog.add(ActionLog.Tag.SELL, relistName + ": relisted at the current price");
+                        ChatUtils.clientMessage(relistName + " satis emri guncel fiyattan yeniden acildi.");
+                        lastRelistMs.put(relistName, System.currentTimeMillis());
+                        finishRelistBook();
+                    }
                 }
-
-
             }
 
             case RECOVERY -> {
@@ -1530,6 +1801,12 @@ public class BazaarFlipper implements Feature {
                     outbidClaimedAmount = 0;
                     storedThisVisit = 0;
                     sellOrderCancelled = false;
+                    // Yarim kalmis bir yenileme varsa bastan baslasin - iptal
+                    // edilmis ama yeniden listelenmemis bir emir birakmayalim.
+                                if (relistBook != null) {
+                        relistStep = Relist.OPEN_ORDERS;
+                        relistWaits = 0;
+                    }
 
                     // ACILIS ORTASINDA TOPARLANDIYSAK Only Sell gorevlerini
                     // atariz; FETCHING yeniden tohumlar. Defter SILINMEZ -
@@ -1609,7 +1886,7 @@ public class BazaarFlipper implements Feature {
             case COMBINE -> "Anvil";
             case SELL -> "Selling";
             case SELL_SCAN -> "Reading sells";
-            case REPLACE_SELL -> "Relisting";
+            case RELIST -> "Relisting";
             case RECOVERY -> "Recovering";
         };
     }
@@ -1862,7 +2139,7 @@ public class BazaarFlipper implements Feature {
      * AÇIK OLAN "Manage Orders" ekranındaki SATIŞ emirlerini izlemeye alır.
      *
      * NEDEN GEREKLİ: BazaarMonitor yalnızca makronun BU OTURUMDA kendi açtığı
-     * satış emirlerini biliyordu (SELL / REPLACE_SELL içindeki add çağrıları).
+     * satış emirlerini biliyordu (SELL / RELIST içindeki add çağrıları).
      * Oyunu kapatıp açınca o liste sıfırlanıyor, önceki oturumda bırakılmış
      * satış emirleri hiç izlenmiyor ve outbid asla tespit edilmiyordu.
      */
@@ -2148,7 +2425,7 @@ public class BazaarFlipper implements Feature {
         }
 
         // Only Sell'de alim yapilmiyor; eski bir "para yetmiyor" bayragi
-        // takili kalirsa IDLE 60 sn sonra bosuna REPLACE_SELL'e kacar.
+        // takili kalirsa IDLE 60 sn sonra bosuna yeniden listelemeye kacar.
         notEnoughCash = false;
 
         // ACILIS BITENE KADAR FAZ HESAPLANMAZ. Gorevler daha yeni kuruluyor ve
@@ -2161,21 +2438,18 @@ public class BazaarFlipper implements Feature {
             return;
         }
 
-        boolean buying = false;
-        for (Task t : task.values()) {
-            if (BUY_PHASE.contains(t.getBookState())) {
-                buying = true;
-                break;
-            }
-        }
-
-        OnlySellMode.Phase next = buying ? OnlySellMode.Phase.FINISHING : OnlySellMode.Phase.SELL_ONLY;
+        // YENI TANIM: faz artik "alim fazinda gorev var mi" degil, "HIC gorev
+        // kaldi mi" sorusuna bakiyor. Kullanicinin istedigi davranis bu: mevcut
+        // gorevler sonuna kadar (alim, depolama, birlestirme, satis) normal
+        // isliyor; hepsi bitince satis nobeti devreye giriyor.
+        boolean anyTaskLeft = !task.isEmpty();
+        OnlySellMode.Phase next = anyTaskLeft ? OnlySellMode.Phase.FINISHING : OnlySellMode.Phase.SELL_ONLY;
         if (next != OnlySellMode.phase()) {
             ActionLog.add(ActionLog.Tag.SYSTEM, next == OnlySellMode.Phase.SELL_ONLY
-                    ? "only sell: buying finished - uptime paused, watching sell orders"
-                    : "only sell: finishing open buy orders");
+                    ? "only sell: all lines finished - watching sell orders for outbids"
+                    : "only sell: finishing the open lines");
             if (next == OnlySellMode.Phase.SELL_ONLY) {
-                ChatUtils.clientMessage("Only Sell: no buy orders left. Uptime paused, now only selling.");
+                ChatUtils.clientMessage("Only Sell: tum hatlar bitti. Artik yalnizca satis emirleri izleniyor.");
             }
         }
         OnlySellMode.setPhase(next);
@@ -2208,6 +2482,101 @@ public class BazaarFlipper implements Feature {
         return added;
     }
 
+    /**
+     * ACIK olan "Manage Orders" ekraninda bu ada sahip SATIS emrinin slotu.
+     *
+     * TAM ESLESME: ad sonundan karsilastirilir. contains kullansaydik
+     * "SELL 16x Ultimate Wise VI" adi "Ultimate Wise V" ile eslesir ve
+     * yanlis emri iptal ederdik. getSellOrder() adinda "SELL" gecen HER
+     * urunu dondurdugu icin bu titizlik sart - elle acilmis alakasiz bir
+     * emri iptal etmek cok kolay.
+     *
+     * @return slot, ya da bu emir ekranda yoksa -1
+     */
+    private int findSellOrderSlot(String sellName) {
+        if (sellName == null) return -1;
+        for (int slot : inventoryScanner.getSellOrder()) {
+            String name = inventoryScanner.getName(slot).replace("SELL ", "").trim();
+            if (name.endsWith(sellName)) return slot;
+        }
+        return -1;
+    }
+
+    /**
+     * Satis emrindeki adet. Ad "SELL 16x Ultimate Wise V" gibi bir onek
+     * tasiyorsa oradan okunur; okunamazsa 1 varsayilir ama en az 2 slot
+     * istenir - bir kitap eksik dusmesindense bir tur beklemek iyidir.
+     */
+    private int sellOrderSize(int slot) {
+        String name = inventoryScanner.getName(slot).replace("SELL ", "").trim();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^(\\d+)x\\s").matcher(name);
+        if (!m.find()) return 2;
+        try {
+            return Math.max(1, Integer.parseInt(m.group(1)));
+        } catch (NumberFormatException e) {
+            return 2;
+        }
+    }
+
+    /** Bir kitabin satis emrini yenileme kuyruguna alir. */
+    private void queueRelist(Book book) {
+        if (book == null) return;
+        String name = book.getRomanLevel(book.sellLevel());
+
+        // SOGUMA SURESI: ayni emri saniyeler icinde tekrar tekrar yenilemek
+        // hem kuyruk sirasini kaybettirir hem bot gibi gorunur. Bazaar fiyati
+        // saliniyorsa monitor art arda "outbid" diyebilir.
+        Long last = lastRelistMs.get(name);
+        if (last != null && System.currentTimeMillis() - last < RELIST_COOLDOWN_MS) {
+            debug("[RELIST] " + name + " soguma suresinde, atlaniyor");
+            return;
+        }
+        // ADA GORE TEKILLESTIR. Kardes hatlar (1to5 ve 2to5) ayri Book
+        // nesneleridir ama AYNI satis emrini paylasirlar. Nesneye gore
+        // tekillestirseydik ikisi de kuyruga girer, ikincisi birincinin yeni
+        // actigi saglikli emri iptal ederdi.
+        for (Book queued : relistQueue) {
+            if (queued.getRomanLevel(queued.sellLevel()).equals(name)) return;
+        }
+        if (relistName != null && relistName.equals(name)) return;
+
+        relistQueue.add(book);
+        relistQueuedMs.put(name, System.currentTimeMillis());
+    }
+
+    /** Sıradaki kitaba geç; kuyruk bittiyse RELIST'ten çık. */
+    private void finishRelistBook() {
+        relistBook = null;
+        relistName = null;
+        relistStep = Relist.OPEN_ORDERS;
+        relistWaits = 0;
+        relistInvBefore = 0;
+        relistCancelled = false;
+        relistFindTries = 0;
+        relistRetries = 0;
+        pendingSellPrice = 0;
+
+        if (relistQueue.isEmpty()) {
+            endRelist("hepsi bitti");
+        }
+    }
+
+    /** RELIST'ten cik: ekrani kapat, IDLE'a don. */
+    private void endRelist(String why) {
+        debug("[RELIST] bitti (" + why + ")");
+        relistBook = null;
+        relistName = null;
+        relistStep = Relist.OPEN_ORDERS;
+        relistWaits = 0;
+        relistInvBefore = 0;
+        relistCancelled = false;
+        relistFindTries = 0;
+        relistRetries = 0;
+        pendingSellPrice = 0;
+        if (isContainerOpen()) minecraft.player.closeContainer();
+        state = State.IDLE;
+    }
+
     /** Config'te bu satis adina ("Wisdom V") sahip kitabi bulur. */
     private Book findBookBySellName(String sellName) {
         if (sellName == null || GoofyConfig.INSTANCE == null) return null;
@@ -2236,9 +2605,19 @@ public class BazaarFlipper implements Feature {
      */
     private void handleSellOutbid(Book book) {
         String name = book.getRomanLevel(book.sellLevel());
-        pendingSellOutbids.add(name);
+        pendingSellOutbidBooks.add(book);
         ActionLog.add(ActionLog.Tag.OUTBID, name + " sell order was outbid");
+        // Izlemeyi birak: yeniden listeledikten sonra yeni fiyatla tekrar
+        // eklenecek. Birakilmazsa ayni emir icin ust uste uyari gelir.
         bazaarMonitor.finishSell(book);
+    }
+
+    /** Kuyrukta bekleyen SATIS outbid'lerini tick thread'inde isler. */
+    private void drainSellOutbids() {
+        Book book;
+        while ((book = pendingSellOutbidBooks.poll()) != null) {
+            queueRelist(book);
+        }
     }
 
     /**
@@ -2340,7 +2719,9 @@ public class BazaarFlipper implements Feature {
             case COMBINE -> 30_000;
             case SELL -> 30_000;
             case SELL_SCAN -> 25_000;
-            case REPLACE_SELL -> 45_000;
+            // RELIST kendi adim sayacini tutuyor (RELIST_MAX_WAITS) ve takilirsa
+            // kendi kendine cikiyor; watchdog'un ikinci kez karismasina gerek yok.
+            case RELIST -> 0;
         };
     }
 
