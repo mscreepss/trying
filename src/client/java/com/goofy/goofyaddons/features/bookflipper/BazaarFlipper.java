@@ -6,6 +6,7 @@ import com.goofy.goofyaddons.features.Feature;
 import com.goofy.goofyaddons.features.FeatureManager;
 import com.goofy.goofyaddons.features.bookflipper.helper.BazaarMonitor;
 import com.goofy.goofyaddons.features.bookflipper.helper.Book;
+import com.goofy.goofyaddons.features.bookflipper.helper.BookLedger;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipCalculator;
 import com.goofy.goofyaddons.features.bookflipper.helper.FlipItem;
 import com.goofy.goofyaddons.features.bookflipper.helper.OnlySellMode;
@@ -30,8 +31,8 @@ import java.util.*;
  *
  *  1) SAYIM DİSİPLİNİ (mal sahipliği): Kitaplar fiziksel olarak birbirinden ayırt
  *     edilemediği için sahiplik ADETLE tutulur. STORE artık envanterdeki TÜM
- *     eşleşen kitapları değil, yalnızca o görevin kendi sayısı (inInventory) kadar
- *     kitabı depolar; ANVIL de depodan yalnızca kendi sayısı (inEnderChest) kadar
+ *     eslesen kitaplari degil, yalnizca DEFTERDE kendi adresine yazili olanlari
+ *     depolar; ANVIL de depodan yalnizca kendi defterinde yazili slotlari
  *     kitap çeker. Eskiden 2to5 görevi STORE'a düştüğünde, 1to5 zincirinin taze
  *     ürettiği Wisdom II'leri de kendi stoğu sanıp ender chest'e gömüyordu; zincir
  *     yarıda kalıyor ve o kitaplar öksüz kalıyordu.
@@ -120,7 +121,19 @@ public class BazaarFlipper implements Feature {
     private boolean useSecondPage = false;
     private boolean secondPageCheck = false;
     /** Depo dolu diye sayfa BİR KEZ çevrildi mi? (iki sayfa da doluysa sonsuz döngüyü keser) */
-    private boolean storePageFlipped = false;
+    /**
+     * Bu depolama ziyaretinde DOLU OLDUGUNU GORDUGUMUZ sayfalar.
+     *
+     * ESKI HALI tek bir boolean'di ("sayfayi bir kez cevirdim mi"). Uc ayri
+     * yerden sifirlaniyordu ve "cevirdim" ile "diger sayfanin dolu oldugunu
+     * gordum" ayni sey sanilıyordu. Sonuc: mod 2. sayfa BOSKEN bile pes edip
+     * 1. sayfayi acip kapatmaya devam ediyordu.
+     *
+     * Artik kanit tutuluyor: bir sayfa ancak DOLU GORULDUYSE buraya girer ve
+     * iki sayfa da girmeden asla pes edilmez. Ayni sayfa iki kez eklenemedigi
+     * icin sonsuz gidip gelme de imkansiz.
+     */
+    private final Set<BookLedger.Place> storeFullPages = new HashSet<>();
     /** Depo ekranı kaç tick'tir açık? (içerik paketi gelsin diye taramayı geciktirir) */
     private int storageOpenTicks = 0;
     private final Clock combineConfirmClock = new Clock();
@@ -153,6 +166,14 @@ public class BazaarFlipper implements Feature {
 
     /** Only Sell: bu baslatmada eldeki stok icin gorevler kuruldu mu? */
     private boolean onlySellSeeded = false;
+    /** SU AN acik olan depo sayfasi - openEnderChest her cagrildiginda guncellenir. */
+    private BookLedger.Place currentStoragePage = BookLedger.Place.STORAGE_1;
+
+    /** STORE: bir onceki tikta depoya atilan kitabin envanter adresi (-1 = yok). */
+    private int pendingStoreAddress = -1;
+    /** STORE: tiklamadan onceki sandik hali - kitabin nereye dustugunu bulmak icin. */
+    private final Set<Integer> storeSnapshot = new HashSet<>();
+
     /** Only Sell: acik satis emirleri bu baslatmada okundu mu? */
     private boolean sellScanDone = false;
     /** SELL_SCAN kac kez denendi? 3'ten sonra pes edilir, sonsuz dongu olmasin. */
@@ -174,6 +195,14 @@ public class BazaarFlipper implements Feature {
             new java.util.concurrent.ConcurrentLinkedQueue<>();
     /** REPLACE_SELL'in su an duzeltmesi gereken satis emrinin adi. */
     private String outbidSellName = null;
+
+    /**
+     * Outbid yenmis ALIM siparisleri. Satis tarafiyla ayni sebep: BazaarMonitor
+     * HTTP thread'inden haber veriyor, gorev haritasina orada dokunmak
+     * ConcurrentModificationException demek.
+     */
+    private final java.util.concurrent.ConcurrentLinkedQueue<Book> pendingBuyOutbids =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
     private int outbidClaimedAmount = 0;
     private int storedThisVisit = 0;
     private boolean sellOrderCancelled = false;
@@ -191,10 +220,9 @@ public class BazaarFlipper implements Feature {
             Task t = e.getValue();
             debug(e.getKey().getRomanLevel(e.getKey().level())
                     + " state=" + t.getBookState()
-                    + " remaining=" + t.getAmountToOrder()
-                    + " inv=" + t.inInventory
-                    + " ec=" + t.inEnderChest
-                    + " credit=" + t.unitCredit
+                    + " eksik=" + missingUnits(e.getKey())
+                    + " siparis=" + t.onOrder
+                    + " " + BookLedger.summary(e.getKey())
                     + " early=" + t.earlyAction);
         }
         debug("---------------------");
@@ -209,6 +237,12 @@ public class BazaarFlipper implements Feature {
             debug("Container is open, closing");
         }
         firstStartUp = true;
+        // Defter diskten okunur: onceki oturumda nerede ne biraktigimizi
+        // biliyoruz. STARTUP_CHECK bunu gercekle karsilastirip hizalayacak.
+        BookLedger.load();
+        pendingStoreAddress = -1;
+        storeSnapshot.clear();
+        storeFullPages.clear();
         onlySellSeeded = false;
         sellScanDone = false;
         sellScanAttempts = 0;
@@ -243,6 +277,13 @@ public class BazaarFlipper implements Feature {
         ChatUtils.clientMessage("BazaarFlipper stopped");
 
         task.clear();
+        // DEFTER SILINMEZ. Makro dursa da kitaplar depoda/envanterde duruyor;
+        // kaydi atarsak yeniden baslattigimizda hepsi "sahipsiz" gorunur ve
+        // hangi hatta ait olduklari bilgisi kaybolur.
+        BookLedger.save();
+        pendingStoreAddress = -1;
+        storeSnapshot.clear();
+        storeFullPages.clear();
         enabled = false;
         state = State.IDLE;
         lastState = null;
@@ -299,6 +340,9 @@ public class BazaarFlipper implements Feature {
         if (minecraft.player == null || minecraft.level == null) return;
 
         bazaarMonitor.onTick();
+        // Outbid haberleri HTTP thread'inden kuyruga dusuyor; gorev haritasina
+        // yalnizca burada, tick thread'inde dokunuluyor.
+        drainBuyOutbids();
         updateOnlySellPhase();
         lastStateCheck();
         watchdog();
@@ -318,9 +362,18 @@ public class BazaarFlipper implements Feature {
         // gecikebiliyor, hemen tarasak boş konteyner görürdük.
         if (isStorageOpen()) {
             storageOpenTicks++;
-            if (storageOpenTicks == 3) syncOpenStoragePage();
+            if (storageOpenTicks == 3) adoptOnOpenStoragePage();
         } else {
             storageOpenTicks = 0;
+        }
+
+        // STORE iki fazli calisiyor: bir tikta kitabi atiyor, sonraki tikta
+        // nereye dustugunu buluyor. Arada state degistiyse (RECOVERY, outbid,
+        // liste bosaldi) bu bayraklar bayatlar ve BIR SONRAKI depolama ziyaretinde
+        // alakasiz bir kaydi siler. O yuzden STORE disinda her tick temizlenir.
+        if (state != State.STORE && pendingStoreAddress >= 0) {
+            pendingStoreAddress = -1;
+            storeSnapshot.clear();
         }
 
         switch (state) {
@@ -343,47 +396,31 @@ public class BazaarFlipper implements Feature {
                     openEnderChest(false);
                 }
 
+                // Sandigin BASLIGI gelince icerigi henuz gelmemis olabiliyor.
+                // Hemen okursak bos sandik goruruz ve defteri yanlislikla
+                // siliveririz - bu yuzden birkac tick beklenir. Menuyu ne zaman
+                // kapatacagimiza biz karar verdigimiz icin beklemek serbest.
                 if (isStorageOpen()) clock.start(randomizer());
                 if ((isStorageOpen()) && clock.shouldFire()) {
-                    List<Book> bookList = new ArrayList<>();
-                    bookList.addAll(booksInState(BookState.SELECTED));
+                    if (storageOpenTicks < 3) return;
 
-                    // Depoda (bu sayfada) duran, hiçbir görevin stoğu olmayan ara seviye
-                    // artıkları birim olarak sipariş miktarından düş. Envanterdeki
-                    // artıklar processData'da zaten düşüldüğü için burada SADECE
-                    // container taranır - çift sayım olmasın.
-                    creditLeftoverUnitsFromContainer(bookList);
+                    // ARTIK SAYMIYOR, DOGRULUYOR.
+                    //
+                    // Eski hali her acilista depoyu bastan sayip sayaclara
+                    // ekliyordu. Artik defter diskten geliyor ve bu tur onun
+                    // gercekle uyusup uyusmadigini kontrol ediyor: acik sayfanin
+                    // kaydi silinip ekranda GERCEKTEN ne varsa yeniden yaziliyor.
+                    // Boylece defter gercege hizalanir, ustune eklenmez.
+                    BookLedger.Place page = currentStoragePage;
 
-                    for (Book book : bookList) {
-                        debug("BazaarFlipper: [STARTUP_CHECK] book: " + book.name());
-                        List<Integer> size = inventoryScanner.findLoreContainer(book.getRomanLevel(book.level()));
-                        debug("BazaarFlipper: [STARTUP_CHECK] Found book: " + book.name() + " Amount: " + size.size() + "In Container");
-                        task.get(book).addInEnderChest(size.size());
+                    for (Book book : booksInState(BookState.SELECTED)) {
+                        int found = resyncStoragePage(book, page);
+                        debug("[STARTUP] " + book.name() + " " + page + ": "
+                                + (found < 0 ? "sayfa bos gorundu, kayitlar korundu" : found + " kitap dogrulandi"));
+
                         if (!secondPageCheck) {
-                            size = inventoryScanner.findLoreInv(book.getRomanLevel(book.level()));
-                            debug("BazaarFlipper: [STARTUP_CHECK] Found book: " + book.name() + " Amount: " + size.size() + "In Inventory");
-                            task.get(book).addInInventory(size.size());
-                        } else {
-                            task.get(book).setShouldCheckSecondPage(true);
-                        }
-
-
-                        // ONLY SELL: siparis miktari 0 oldugu icin her gorev daha
-                        // ILK sayfada "tamamlandi" gorunur. Burada ANVIL'e yollarsak
-                        // bu kitap SELECTED olmaktan cikar ve IKINCI sayfa onun icin
-                        // hic taranmaz - depoda 2. sayfada duran kitaplar gorunmez
-                        // olurdu. Yonlendirme iki sayfa da bitince, tek seferde
-                        // finishOnlySellStartup() icinde yapilir.
-                        if (OnlySellMode.isEnabled()) continue;
-
-                        if (task.get(book).isCompleted()) {
-                            editStateBook(book, BookState.ANVIL);
-                            continue;
-                        }
-
-                        if (task.get(book).shouldStore()) {
-                            editStateBook(book, BookState.STORE);
-                            task.get(book).setEarlyStore(true);
+                            int inv = resyncInventory(book);
+                            debug("[STARTUP] " + book.name() + " envanter: " + inv + " kitap dogrulandi");
                         }
                     }
 
@@ -484,9 +521,9 @@ public class BazaarFlipper implements Feature {
                     // Fırsatçı depo taraması sırasında bu görev çoktan dolmuş olabilir.
                     // "16 lazımdı, elimde 17 var" durumunda eskiden -1 adetlik anlamsız
                     // bir sipariş açılıyordu; artık doğrudan çekiç turuna geçiyoruz.
-                    if (task.get(selectedBook).isCompleted()) {
+                    if (isCompleted(selectedBook)) {
                         debug(selectedBook.getRomanLevel(selectedBook.level())
-                                + " icin siparise gerek yok (eksik=" + task.get(selectedBook).getAmountToOrder()
+                                + " icin siparise gerek yok (eksik=" + missingUnits(selectedBook)
                                 + "), ANVIL'e geciliyor");
                         editStateBook(selectedBook, BookState.ANVIL);
                         return;
@@ -504,7 +541,7 @@ public class BazaarFlipper implements Feature {
                     state = State.STORE;
                     isInventoryFull = false;
                     useSecondPage = false;
-                    storePageFlipped = false;
+                    storeFullPages.clear();
                     storedThisVisit = 0;
                     return;
                 }
@@ -525,13 +562,13 @@ public class BazaarFlipper implements Feature {
                     isInventoryFull = false;
                     boolean shouldCheck = false;
                     for (Book book : booksToAnvil) {
-                        if (task.get(book).shouldCheckEnderChest()) {
+                        if (hasStorage(book)) {
                             shouldCheck = true;
                             continue;
                         }
 
                         ActionLog.add(ActionLog.Tag.ANVIL, book.name() + ": entered anvil with "
-                                + Math.max(0, task.get(book).inInventory) + " books");
+                                + heldUnits(book) + " units");
                         editStateBook(book, BookState.COMBINE);
                     }
                     if (shouldCheck) {
@@ -611,6 +648,11 @@ public class BazaarFlipper implements Feature {
                 if (containerCheck("Confirm") && clock.shouldFire()) {
                     debug("confirming buy order for " + activeBook);
                     click(13, false);
+                    // SIPARIS ARTIK GERCEKTEN ACILDI - kaydi simdi tut. Tabelada
+                    // tutsaydik, arada takilan bir tur "acilmamis siparisi acilmis"
+                    // sayar ve hat bos elle zincire girerdi.
+                    Task placed = task.get(activeBook);
+                    if (placed != null) placed.onOrder = lastOrderAmount;
                     ActionLog.add(ActionLog.Tag.BUY, activeBook.getRomanLevel(activeBook.level())
                             + " x" + lastOrderAmount + " buy order placed");
                     if (shouldStore(activeBook)) {
@@ -651,6 +693,20 @@ public class BazaarFlipper implements Feature {
 
                     if (claimedItems) {
                         if (didReceiveItems) {
+                            // ESYALAR GELDI. Eskiden tooltip'te yazan sayi koru
+                            // korune deftere ekleniyordu ("5 yaziyordu, demek ki
+                            // 5 geldi"). Artik envanter TARANIYOR: kitaplar
+                            // gercekten nerede, oradan yaziliyor.
+                            Task ct = task.get(bookToHandle);
+                            int added = registerClaimed(bookToHandle,
+                                    ct == null ? targetUnits(bookToHandle) : Math.max(1, ct.onOrder));
+                            if (ct != null) ct.onOrder = Math.max(0, ct.onOrder - added);
+                            outbidClaimedAmount += added;
+
+                            if (added == 0) {
+                                ledgerWarn(bookToHandle, "claim sonrasi envanterde yeni kitap bulunamadi");
+                            }
+
                             claimedItems = false;
                             didReceiveItems = false;
                             return;
@@ -663,7 +719,7 @@ public class BazaarFlipper implements Feature {
                     debug("found " + slots.size() + " slots for " + bookToHandle);
 
                     if (slots.isEmpty()) {
-                        if (!task.get(bookToHandle).isCompleted() && !didRemoveOrder && counterBazaar < 3) {
+                        if (!isCompleted(bookToHandle) && !didRemoveOrder && counterBazaar < 8) {
                             counterBazaar++;
                             return;
                         }
@@ -674,13 +730,17 @@ public class BazaarFlipper implements Feature {
                         // ortasında OUTBID'e atıyordu - havuz bölünüp öksüz doğuyordu.
                         bazaarMonitor.finish(bookToHandle);
 
-                        int remainingOrder = Math.max(0, task.get(bookToHandle).getAmountToOrder());
+                        // Siparis ekranda yok: bazaar'da bekleyen bir sey kalmadi.
+                        Task gone = task.get(bookToHandle);
+                        if (gone != null) gone.onOrder = 0;
+
+                        int remainingOrder = missingUnits(bookToHandle);
                         ActionLog.add(ActionLog.Tag.OUTBID, bookToHandle.getRomanLevel(bookToHandle.level())
                                 + ": " + outbidClaimedAmount + " claimed, "
                                 + (remainingOrder == 0 ? "line complete" : remainingOrder + " being re-ordered"));
                         outbidClaimedAmount = 0;
 
-                        editStateBook(bookToHandle, task.get(bookToHandle).isCompleted() ? BookState.ANVIL : BookState.SELECTED);
+                        editStateBook(bookToHandle, isCompleted(bookToHandle) ? BookState.ANVIL : BookState.SELECTED);
                         didRemoveOrder = false;
                         counterBazaar = 0;
                         return;
@@ -696,7 +756,7 @@ public class BazaarFlipper implements Feature {
                             editStateBook(bookToHandle, BookState.STORE);
                             state = State.STORE;
                             isInventoryFull = true;
-                            storePageFlipped = false;
+                            storeFullPages.clear();
                             minecraft.player.closeContainer();
                             return;
                         }
@@ -706,11 +766,10 @@ public class BazaarFlipper implements Feature {
                             return;
                         }
 
+                        // Sayi burada deftere YAZILMAZ. Esyalar geldigini
+                        // bildiren "Claimed" mesaji dusunce envanter taranip
+                        // gercekten ne geldiyse o yazilir (yukaridaki blok).
                         claimedItems = true;
-
-
-                        task.get(bookToHandle).addInInventory(amount);
-                        outbidClaimedAmount += amount;
                     }
                 }
 
@@ -748,30 +807,79 @@ public class BazaarFlipper implements Feature {
                     }
 
                     Task storeTask = task.get(bookToHandle);
-                    List<Integer> slots = new ArrayList<>();
-                    slots.addAll(inventoryScanner.findLoreInv(bookToHandle.getRomanLevel(bookToHandle.level())));
+                    BookLedger.Place page = currentStoragePage;
+                    String baseName = bookToHandle.getRomanLevel(bookToHandle.level());
 
-                    // SAYIM DİSİPLİNİ: envanterdeki her eşleşen kitabı değil, SADECE bu
-                    // görevin kendi sayısı kadarını depola. ESKİ KOD hepsini gömüyordu;
-                    // 1to5 zinciri Wisdom II üretmişken 2to5 görevi STORE'a düşerse o
-                    // kitaplar da depoya gidiyor, zincir yarıda kalıyor ve öksüz parça
-                    // doğuyordu. Kitaplar birbirinin aynı olduğu için hangi fiziksel
-                    // kitabın taşındığı önemsiz; önemli olan ADEDİN doğru olması.
-                    if (!slots.isEmpty() && storeTask.inInventory > 0) {
+                    // FAZ 2: bir onceki tikta bir kitap attik; simdi NEREYE
+                    // dustugunu bulup deftere yaziyoruz. Onceden sandikta olmayan
+                    // ve baska hatta ait olmayan slot bizimkidir.
+                    if (pendingStoreAddress >= 0) {
+                        boolean landed = false;
+                        for (int slot : inventoryScanner.findLoreContainer(baseName)) {
+                            if (storeSnapshot.contains(slot)) continue;
+                            if (BookLedger.ownedByOther(bookToHandle, page, slot)) continue;
+                            BookLedger.add(bookToHandle, page, slot, bookToHandle.level());
+                            BookLedger.remove(bookToHandle, BookLedger.Place.INVENTORY, pendingStoreAddress);
+                            debug("stored -> " + page + " slot " + slot);
+                            landed = true;
+                            break;
+                        }
+                        if (!landed) {
+                            // Tiklama dusmus olabilir. Envanterdeki adres hala
+                            // duruyorsa kayit da duruyor, bir sonraki turda
+                            // yeniden denenir; durmuyorsa kitap kayip demektir.
+                            if (!inventoryScanner.inventorySlotHas(pendingStoreAddress, baseName)) {
+                                BookLedger.remove(bookToHandle, BookLedger.Place.INVENTORY, pendingStoreAddress);
+                                ledgerWarn(bookToHandle, "depoya atilan kitap ne envanterde ne sandikta bulundu");
+                            }
+                        }
+                        pendingStoreAddress = -1;
+                        storeSnapshot.clear();
+                        return;
+                    }
+
+                    // FAZ 1: defterdeki kendi TABAN SEVIYE kitaplarindan birini at.
+                    // Ara seviye kitaplar depolanmaz - onlar cekic isi.
+                    BookLedger.Holding next = null;
+                    for (BookLedger.Holding h : BookLedger.of(bookToHandle, BookLedger.Place.INVENTORY)) {
+                        if (h.level() != bookToHandle.level()) continue;
+                        next = h;
+                        break;
+                    }
+
+                    if (next != null) {
                         if (inventoryScanner.getEmptyContainerSlots() == 0) {
-                            // ESKİ KOD burada koşulsuz useSecondPage = true yapıyordu.
-                            // İki sayfa da doluysa aynı dolu sayfayı sonsuza kadar
-                            // açıp kapatıyordu (log: "no container, opening ender chest"
-                            // satırının saniyede 2-3 kez tekrarlaması). Artık sayfa
-                            // yalnızca BİR KEZ çevrilir, ikisi de doluysa pes edilir.
-                            if (!storePageFlipped) {
-                                storePageFlipped = true;
-                                useSecondPage = !useSecondPage;
-                                storeTask.setShouldCheckSecondPage(useSecondPage);
-                                debug("bu depo sayfasi dolu, diger sayfaya geciliyor (secondPage=" + useSecondPage + ")");
+                            // BU sayfanin dolu oldugunu GORDUK - kanit defterine yaz.
+                            storeFullPages.add(page);
+
+                            BookLedger.Place other = page == BookLedger.Place.STORAGE_1
+                                    ? BookLedger.Place.STORAGE_2
+                                    : BookLedger.Place.STORAGE_1;
+
+                            if (!storeFullPages.contains(other)) {
+                                // Diger sayfayi HENUZ dolu gormedik. Bos olabilir -
+                                // bakmadan pes etmek kullanicinin bildirdigi hataydi:
+                                // depo 2 bombosken depo 1 acilip kapaniyordu.
+                                useSecondPage = other == BookLedger.Place.STORAGE_2;
+                                debug("bu sayfa (" + page + ") dolu, " + other + " deneniyor");
                                 minecraft.player.closeContainer();
                                 return;
                             }
+
+                            // IKI SAYFAYI DA DOLU GORDUK.
+                            if (inventoryScanner.getEmptyInventorySlots() == 0) {
+                                // Envanter de dolu: makronun yapabilecegi hicbir sey
+                                // yok. Devam etmek OUTBID <-> STORE arasinda sonsuz
+                                // bir tur demek - saniyede birkac kez /ec komutu.
+                                ChatUtils.clientMessage("Depo VE envanter dolu - makro durduruldu. "
+                                        + "Yer acip yeniden baslat.");
+                                ActionLog.add(ActionLog.Tag.SYSTEM,
+                                        "storage and inventory both full - macro stopped");
+                                minecraft.player.closeContainer();
+                                FeatureManager.INSTANCE.stop();
+                                return;
+                            }
+
                             ChatUtils.clientMessage("Depo tamamen dolu! " + bookToHandle.name()
                                     + " kitaplari envanterde tutuluyor. Depoda yer acilmadan depolama yapilamaz.");
                             storeTask.setEarlyAction(false);
@@ -782,11 +890,25 @@ public class BazaarFlipper implements Feature {
                             return;
                         }
 
-                        click(slots.getFirst(), true);
-                        debug("storing " + bookToHandle.name() + " at slot " + slots.getFirst() + " (kalan kendi payi: " + (storeTask.inInventory - 1) + ")");
-                        storeTask.addInInventory(-1);
-                        storeTask.addInEnderChest(1);
-                        storePageFlipped = false;
+                        int clickId = inventoryScanner.inventoryClickId(next.slot());
+                        if (clickId < 0 || !inventoryScanner.inventorySlotHas(next.slot(), baseName)) {
+                            // Defter "burada bir kitap var" diyor ama yok.
+                            // Kaydi sil, alarmi calistir, dongude kalma.
+                            BookLedger.remove(bookToHandle, BookLedger.Place.INVENTORY, next.slot());
+                            ledgerWarn(bookToHandle, "envanter " + next.slot() + " bos cikti, kayit silindi");
+                            return;
+                        }
+
+                        // Tiklamadan ONCE sandigin halini not al ki kitabin
+                        // hangi slota dustugunu bir sonraki tikta bulabilelim.
+                        storeSnapshot.clear();
+                        storeSnapshot.addAll(inventoryScanner.findLoreContainer(baseName));
+                        pendingStoreAddress = next.slot();
+
+                        click(clickId, true);
+                        debug("storing " + bookToHandle.name() + " from inv address " + next.slot());
+                        // Bu sayfaya kitap sigdi: "dolu" kanidi artik gecersiz.
+                        storeFullPages.clear();
                         storedThisVisit++;
                         return;
                     }
@@ -795,7 +917,7 @@ public class BazaarFlipper implements Feature {
                     if (storedThisVisit > 0) {
                         ActionLog.add(ActionLog.Tag.STORE, bookToHandle.getRomanLevel(bookToHandle.level())
                                 + ": " + storedThisVisit + " moved to storage, "
-                                + Math.max(0, storeTask.getAmountToOrder()) + " still on buy order");
+                                + onOrderOf(bookToHandle) + " still on buy order");
                         storedThisVisit = 0;
                     }
 
@@ -825,48 +947,48 @@ public class BazaarFlipper implements Feature {
                     return;
                 }
 
+                Task currentTask = task.get(bookToHandle);
+                boolean wantSecondPage = currentTask.pullFrom == BookLedger.Place.STORAGE_2;
+
                 if (!isStorageOpen()) clock.start(randomizer());
                 if (!isStorageOpen() && clock.shouldFire()) {
-                    debug("no ender chest, opening it");
-                    if (task.get(bookToHandle).isShouldCheckSecondPage()) {
-                        openEnderChest(true);
-                        return;
-                    }
-                    openEnderChest(false);
-
+                    debug("no ender chest, opening " + currentTask.pullFrom);
+                    openEnderChest(wantSecondPage);
+                    return;
                 }
 
-                    if (isStorageOpen()) clock.start(speedMode());
-                    if ((isStorageOpen()) && clock.shouldFire()) {
-                    Task currentTask = task.get(bookToHandle);
-                    List<Integer> slots = new ArrayList<>();
+                if (isStorageOpen()) clock.start(speedMode());
+                if (isStorageOpen() && clock.shouldFire()) {
+                    // Acik olan sayfayi kullan, istedigimizi degil: /ec komutu
+                    // beklenenden farkli bir sayfa acmis olabilir.
+                    BookLedger.Place page = currentStoragePage;
 
-                    slots.addAll(inventoryScanner.findLoreContainer(bookToHandle.getRomanLevel(bookToHandle.level())));
+                    // DEFTERE GORE CEK: hangi sayfada, hangi slotta oldugunu
+                    // biliyoruz. Once o slotta gercekten beklenen kitap var mi
+                    // diye DOGRULARIZ - defter yaniliyorsa sessizce yanlis slota
+                    // tiklamak yerine kaydi duzeltiriz.
+                    List<BookLedger.Holding> here = BookLedger.of(bookToHandle, page);
 
-                    // Depoda kaç tane olduğu değil, BİZİM kaç tane çekeceğimiz önemli:
-                    // slots listesi bir önceki turdan kalmış ya da başka bir göreve ait
-                    // kitapları da içerebilir, hepsini sığdırmaya çalışıp boşuna
-                    // COMBINE'a kaçmayalım.
-                    int booksToPull = Math.min(slots.size(), Math.max(0, currentTask.inEnderChest));
-
-                    if (booksToPull > inventoryScanner.getEmptyInventorySlots()) {
-                        // ONLY SELL SONSUZ DONGU EMNIYETI.
-                        //
-                        // Normalde envanter dolduysa STORE fazi yer acar. Only
-                        // Sell'de STORE fazi YOK, yani hicbir sey yer acmaz ve su
-                        // tur sonsuza kadar doner:
-                        //   ANVIL -> COMBINE (yapacak is yok) -> SELL (liste bos)
-                        //   -> FETCHING -> IDLE -> ANVIL ...
-                        // Her turda bir /ec komutu gider. Watchdog bunu goremez
-                        // cunku state HER TICK degisiyor, stateEnteredMs surekli
-                        // sifirlaniyor. Uc denemeden sonra bu hat birakilir.
-                        if (OnlySellMode.isEnabled()) {
+                    if (!here.isEmpty() && inventoryScanner.getEmptyInventorySlots() <= 0) {
+                        // Envanterde yer yok. STORE fazi yer acar; Only Sell'de
+                        // STORE olmadigi icin hicbir sey acmaz ve
+                        // ANVIL -> COMBINE -> SELL -> FETCHING -> IDLE -> ANVIL
+                        // turu sonsuza kadar doner. Watchdog goremez, cunku state
+                        // her tick degisiyor. Uc denemede hat birakilir.
+                        // SAYAC HER MODDA CALISIR. Eskiden yalnizca Only Sell'de
+                        // vardi; normal modda cikis yolu olmayan bir dongu kaliyordu:
+                        // ANVIL -> COMBINE -> SELL -> FETCHING -> IDLE -> ANVIL,
+                        // her turda bir /ec komutu. State her tick degistigi icin
+                        // watchdog da goremiyordu.
+                        {
                             currentTask.anvilFullBounces++;
                             if (currentTask.anvilFullBounces >= 3) {
                                 ChatUtils.clientMessage(bookToHandle.name()
                                         + ": envanter dolu, bu hat birakildi. Yer acip makroyu yeniden baslat.");
                                 ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name()
-                                        + ": inventory full, line dropped - free some slots and restart");
+                                        + ": inventory full, line paused - free some slots and restart");
+                                // Kitaplar hala sandikta: defter KALIR, yoksa
+                                // yeniden baslatinca sahipleri kaybolur.
                                 task.remove(bookToHandle);
                                 state = State.IDLE;
                                 minecraft.player.closeContainer();
@@ -879,66 +1001,60 @@ public class BazaarFlipper implements Feature {
                     }
                     currentTask.anvilFullBounces = 0;
 
-                    debug("found " + slots.size() + " book slots in ender chest, kendi payimiz: " + booksToPull);
+                    for (BookLedger.Holding h : here) {
+                        String loreName = bookToHandle.getRomanLevel(h.level());
 
-                    // SAYIM DİSİPLİNİ: depodaki her eşleşen kitabı değil, SADECE bu
-                    // görevin kendi sayısı (inEnderChest) kadarını çek. Aksi halde
-                    // kardeş görevin (ör. 2to5) depodaki stoğu da havuza karışıyor,
-                    // toplam 2'nin kuvveti olmaktan çıkıyor ve zincir sonunda artık
-                    // (öksüz parça) kalıyordu.
-                    if (!slots.isEmpty() && currentTask.inEnderChest > 0) {
-                        debug("pulling slot " + slots.getFirst() + " from ender chest (kalan kendi payi: " + (currentTask.inEnderChest - 1) + ")");
-                        click(slots.getFirst(), true);
-                        currentTask.addInInventory(1);
-                        currentTask.addInEnderChest(-1);
-                        // İlerleme kaydettik: bir sonraki takılmada iki sayfa da yeniden
-                        // taranabilsin ve COMBINE tekrar bir kez ANVIL'e yollayabilsin.
-                        currentTask.setOtherPageChecked(false);
+                        if (!inventoryScanner.containerSlotHas(h.slot(), loreName)) {
+                            // Defter yaniliyor. Kaydi sil ve ALARMI CALDIR -
+                            // oksuz kitabin izini ancak boyle surebiliriz.
+                            BookLedger.remove(bookToHandle, page, h.slot());
+                            ledgerWarn(bookToHandle, page + " slot " + h.slot()
+                                    + " beklenen " + loreName + " degil, kayit silindi");
+                            return;
+                        }
+
+                        debug("pulling " + loreName + " from " + page + " slot " + h.slot());
+                        click(h.slot(), true);
+                        // Kitap artik envantere gecti; adresini bir sonraki
+                        // taramada ogrenecegiz, simdilik depo kaydini dusur.
+                        BookLedger.remove(bookToHandle, page, h.slot());
+                        currentTask.anvilAdoptions = 0;
                         currentTask.setAnvilRecheckAttempted(false);
                         return;
                     }
 
-                    // Taban seviye bitti. Depoda bu isme ait, hiçbir görevin stoğu
-                    // olmayan ara seviye artık varsa (III/IV) onları da envantere al -
-                    // birleştirme havuzuna katılsınlar, depoda çürümesinler. Sayaçlara
-                    // dokunulmaz, çünkü bu artıklar sipariş miktarından zaten düşüldü.
-                    List<Integer> leftovers = leftoverContainerSlots(bookToHandle);
-                    if (!leftovers.isEmpty() && inventoryScanner.getEmptyInventorySlots() > 0) {
-                        debug("pulling leftover intermediate book from slot " + leftovers.getFirst());
-                        click(leftovers.getFirst(), true);
-                        currentTask.setOtherPageChecked(false);
-                        currentTask.setAnvilRecheckAttempted(false);
+                    // Bu sayfada bize ait kayit kalmadi. Sayfayi bir kez daha
+                    // tarayip SAHIPSIZ kitap var mi diye bakariz - baska bir
+                    // seansta ya da elle birakilmis kitaplar burada sahiplenilir.
+                    // Sahipsiz kitap avi - ama SINIRLI. Tikladigimiz kitabi
+                    // sunucu geri cevirirse kayit silinir, kitap sandikta kalir,
+                    // burada yeniden sahiplenilir ve sonsuz tikla-sil-sahiplen
+                    // dongusu olusur. Iki denemeden sonra bu sayfayla isimiz biter.
+                    int adopted = currentTask.anvilAdoptions >= 2 ? 0
+                            : adoptUnownedHere(bookToHandle, page);
+                    if (adopted > 0) {
+                        currentTask.anvilAdoptions++;
+                        ledgerWarn(bookToHandle, page + " sayfasinda " + adopted + " sahipsiz kitap bulundu");
                         return;
                     }
 
-                    // Bu sayfada bize ait kitap yok. DİĞER sayfaya (ec / ec 2) bir kez bak.
-                    // ESKİ KOD sadece shouldCheckSecondPage bayrağı açıksa sayfa
-                    // değiştiriyordu; bayrak kapalıyken kitaplar 2. sayfada kalmışsa
-                    // bot onları hiç göremiyor, sayaç "ec=2" derken depoda 0 buluyor ve
-                    // ANVIL <-> COMBINE arasında sonsuza kadar gidip geliyordu.
-                    if (!currentTask.isOtherPageChecked()) {
-                        currentTask.setOtherPageChecked(true);
-                        currentTask.setShouldCheckSecondPage(!currentTask.isShouldCheckSecondPage());
-                        debug("bu sayfada yok, diger sayfaya bakiliyor (secondPage=" + currentTask.isShouldCheckSecondPage() + ")");
+                    // Diger sayfaya bir kez bak.
+                    if (!currentTask.bothPagesChecked) {
+                        currentTask.bothPagesChecked = true;
+                        currentTask.pullFrom = wantSecondPage
+                                ? BookLedger.Place.STORAGE_1
+                                : BookLedger.Place.STORAGE_2;
+                        debug("bu sayfada is bitti, diger sayfaya bakiliyor: " + currentTask.pullFrom);
                         minecraft.player.closeContainer();
                         return;
                     }
 
-                    // Her iki sayfa da tarandı. FİZİKSEL GERÇEK SAYAÇTAN ÜSTÜNDÜR:
-                    // depoda bize ait kitap yoksa sayacı sıfırla, yoksa COMBINE
-                    // "depoda hâlâ kitap var" sanıp bizi tekrar buraya yollar.
-                    if (currentTask.inEnderChest > 0) {
-                        debug("sayac ec=" + currentTask.inEnderChest + " diyor ama iki sayfada da yok, sayac gercege gore sifirlaniyor");
-                        currentTask.clearEnderChest();
-                    }
-                    // Ara seviye artik bayragi da burada duser: iki sayfa da
-                    // tarandi, depoda alinacak bir sey kalmadi. Dusmezse
-                    // shouldCheckEnderChest() surekli true doner ve gorev
-                    // ANVIL <-> COMBINE arasinda gidip gelir.
-                    currentTask.storageLeftover = false;
+                    currentTask.bothPagesChecked = false;
+                    currentTask.anvilAdoptions = 0;
+                    currentTask.pullFrom = BookLedger.Place.STORAGE_1;
 
                     ActionLog.add(ActionLog.Tag.ANVIL, bookToHandle.name() + ": entered anvil with "
-                            + Math.max(0, currentTask.inInventory) + " books");
+                            + heldUnits(bookToHandle) + " units");
                     editStateBook(bookToHandle, BookState.COMBINE);
                 }
             }
@@ -974,13 +1090,19 @@ public class BazaarFlipper implements Feature {
                         // Önce gerçekten envanterde satış seviyesinde kitap var mı bak.
                         if (!inventoryScanner.locate(bookToHandle.getRomanLevel(bookToHandle.sellLevel())).isEmpty()) {
                             debug("no pair to combine, sell-level copy confirmed in inventory, switching to SELL");
+                            // ZINCIR KILIDINI BIRAKMADAN ONCE artiklari deftere yaz.
+                            // Elde eslesmemis bir Wisdom 4 kaldiysa ADRESI VE SAHIBI
+                            // olsun ki kardes hat onu kendi kitabi sanip almasin ve
+                            // biz eksigimizi tam olarak hesaplayabilelim.
+                            registerCombineLeftovers(bookToHandle);
                             editStateBook(bookToHandle, BookState.SELL);
-                        } else if (task.get(bookToHandle).inEnderChest > 0 && !task.get(bookToHandle).isAnvilRecheckAttempted()) {
+                        } else if (hasStorage(bookToHandle) && !task.get(bookToHandle).isAnvilRecheckAttempted()) {
                             // Depoyu SADECE BİR KEZ yeniden kontrol et. Sınırsız
                             // denemek sonsuz ANVIL <-> COMBINE döngüsü demek: sayaç
                             // "depoda kitap var" derken depo boşsa bot iki state
                             // arasında saatlerce gidip geliyordu.
                             task.get(bookToHandle).setAnvilRecheckAttempted(true);
+                            task.get(bookToHandle).bothPagesChecked = false;
                             debug("no pair to combine AND no sell-level copy found for " + bookToHandle.name() + ", sending back to ANVIL to recheck ender chest (tek seferlik)");
                             editStateBook(bookToHandle, BookState.ANVIL);
                         } else {
@@ -992,12 +1114,43 @@ public class BazaarFlipper implements Feature {
                             // döngüye girmemek için görevi bırakıyoruz; kalan parçalar
                             // makro yeniden başlatıldığında STARTUP_CHECK tarafından
                             // birim olarak sayılıp sipariş miktarından düşülecek.
-                            ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik kaldi, gorev birakiliyor. Kalan ara seviye kitaplar makro yeniden baslatildiginda siparis miktarindan dusulecek.");
-                            debug("dead end for " + bookToHandle.name() + " - physical shortage, dropping task");
+                            // ESKIDEN HAT BURADA COPE ATILIYORDU. Artik atilmiyor:
+                            // elde ne kaldiysa deftere yazilir, eksik birim TAM
+                            // olarak hesaplanir ve o kadar tamamlama siparisi acilir.
+                            // Oksuz parca boylece bir cikmaz sokak degil, sadece bir
+                            // ara durum olur - hat onu yiyip bitirir.
+                            registerCombineLeftovers(bookToHandle);
+                            int missing = missingUnits(bookToHandle);
+
+                            if (missing <= 0 && heldUnits(bookToHandle) <= 0) {
+                                // ELDE HICBIR SEY YOKSA kapat. Elde kitap varken
+                                // asla kapatma: kaydi silmek o kitaplari sahipsiz
+                                // birakir - yani tam da onlemeye calistigimiz sey.
+                                ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
+                                        + ": nothing left to combine, line closed");
+                                TradeHistory.abandon(bookToHandle);
+                                dropLine(bookToHandle);
+                                return;
+                            }
+
+                            if (missing <= 0) {
+                                // Birim olarak tam ama cekic ciftleyemedi. Normalde
+                                // olmamali (2'nin kuvvetleri her zaman ciftlenir).
+                                // Sessizce dusurmek yerine bir kez daha depoya bak.
+                                ledgerWarn(bookToHandle, "havuz tam ama ciftlenemedi - depo yeniden taraniyor");
+                                task.get(bookToHandle).setAnvilRecheckAttempted(false);
+                                task.get(bookToHandle).bothPagesChecked = false;
+                                editStateBook(bookToHandle, BookState.ANVIL);
+                                return;
+                            }
+
+                            ChatUtils.clientMessage(bookToHandle.name() + " icin havuz eksik: "
+                                    + missing + " birim tamamlama siparisi aciliyor.");
                             ActionLog.add(ActionLog.Tag.COMBINE, bookToHandle.name()
-                                    + ": not enough books left, line dropped");
-                            TradeHistory.abandon(bookToHandle);
-                            task.remove(bookToHandle);
+                                    + ": pool short by " + missing + ", topping up");
+                            ledgerWarn(bookToHandle, "cekic bitti ama havuz eksik (" + missing + " birim)");
+                            task.get(bookToHandle).setAnvilRecheckAttempted(false);
+                            editStateBook(bookToHandle, BookState.SELECTED);
                         }
                         return;
                     }
@@ -1149,17 +1302,10 @@ public class BazaarFlipper implements Feature {
 
                     // ONLY SELL HATTI BURADA KAPANIR - asagidaki dala GIRMEZ.
                     //
-                    // NEDEN: Only Sell gorevlerinde amountToOrder = 0, yani
-                    // getAmountToOrder() = 0 - (depo + envanter) neredeyse her zaman
-                    // negatiftir ve bu dal calisir. Icerideki addInInventory(-qty)
-                    // TAM havuz kadar dusuyor; ama havuzun bir kismi unitCredit
-                    // olarak sayilmissa (depodaki ara seviye kitaplar) sayac EKSIYE
-                    // duser. O zaman getAmountToOrder() ARTIYA doner, isCompleted()
-                    // false olur ve IDLE gorevi BAZAAR_NAVIGATION'a yollar:
-                    // "hicbir sey satin alma" modu gercek parayla alim yapar.
-                    //
-                    // Depoda hala stok kaldiysa kaybolmaz; makroyu yeniden
-                    // baslatinca STARTUP_CHECK onu bulur ve yeni bir tur baslar.
+                    // Only Sell'de onOrder her zaman 0'dir, yani hat asla yeni
+                    // siparis acamaz. Satis yapildiktan sonra hatti yasatmanin
+                    // anlami yok: elde kalan varsa defterde duruyor ve makroyu
+                    // yeniden baslatinca STARTUP_CHECK onu bulup yeni tur baslatir.
                     if (soldTask != null && OnlySellMode.isEnabled()) {
                         ActionLog.add(ActionLog.Tag.SELL, soldBook.name() + ": only sell line finished");
 
@@ -1173,14 +1319,17 @@ public class BazaarFlipper implements Feature {
                         // yeniden acar ya da "havuz eksik kaldi" diye dusulur.
                         for (Book sameName : booksInState(BookState.SELL)) {
                             if (!sameName.name().equals(soldBook.name())) continue;
-                            task.remove(sameName);
+                            dropLine(sameName);
                         }
-                        task.remove(soldBook);
+                        dropLine(soldBook);
                         return;
                     }
 
-                    if (soldTask != null && soldTask.getAmountToOrder() < 0) {
-                        soldTask.addInInventory(-soldBook.getQtyAmount(soldBook.level()));
+                    // Satis emri acildi: satilan kitaplar artik elimizde degil.
+                    // Defterden dus, sonra elde HALA birim kaldiysa (32 kitaplik
+                    // iki setlik havuz gibi) hat yasamaya devam etsin.
+                    registerCombineLeftovers(soldBook);
+                    if (soldTask != null && heldUnits(soldBook) > 0) {
                         editStateBook(soldBook, BookState.SELECTED);
                         // Gorev yasamaya devam ediyor: yeni bir olcum turu baslasin.
                         TradeHistory.begin(soldBook);
@@ -1191,7 +1340,7 @@ public class BazaarFlipper implements Feature {
                     // ulaştıysa (1to5 + 2to5 havuzu birlikte birleştiği için normal),
                     // tek satış emri hepsini kapsar; o görevleri toplu kaldır.
                     removeDuplicateBooks(task);
-                    task.remove(soldBook);
+                    dropLine(soldBook);
                     bookList.removeFirst();
 
                 }
@@ -1376,21 +1525,17 @@ public class BazaarFlipper implements Feature {
                     didReceiveItems = false;
                     isInventoryFull = false;
                     useSecondPage = false;
-                    storePageFlipped = false;
+                    storeFullPages.clear();
                     secondPageCheck = false;
                     outbidClaimedAmount = 0;
                     storedThisVisit = 0;
                     sellOrderCancelled = false;
 
                     // ACILIS ORTASINDA TOPARLANDIYSAK Only Sell gorevlerini
-                    // atariz. RECOVERY secondPageCheck'i sifirliyor, yani
-                    // STARTUP_CHECK 1. sayfayi bastan tarayacak. Only Sell'de
-                    // gorevler iki sayfa boyunca SELECTED kaldigi icin ayni
-                    // kitaplar IKINCI kez sayilir: inEnderChest ve unitCredit
-                    // ikiye katlanir. inEnderChest ANVIL'de kendini duzeltiyor
-                    // ama unitCredit duzelmiyor - eli bos bir gorev "stok var"
-                    // gorunup cekici bosuna acardi. Temiz sayfadan baslamak
-                    // bedava: FETCHING yeniden tohumlar.
+                    // atariz; FETCHING yeniden tohumlar. Defter SILINMEZ -
+                    // kitaplar hala yerinde duruyor, yalnizca gorev nesneleri
+                    // sifirdan kuruluyor ki STARTUP_CHECK temiz bir dogrulama
+                    // turu yapabilsin.
                     if (firstStartUp && OnlySellMode.isEnabled()) {
                         task.clear();
                         onlySellSeeded = false;
@@ -1430,8 +1575,8 @@ public class BazaarFlipper implements Feature {
             Task t = entry.getValue();
 
             int target = book.getQtyAmount(book.level());
-            int owned = Math.max(0, t.inEnderChest + t.inInventory + t.unitCredit);
-            int onOrder = Math.max(0, t.getAmountToOrder());
+            int owned = heldUnits(book);
+            int onOrder = onOrderOf(book);
 
             lines.add(new TaskInfo(book.name(), book.level(), book.sellLevel(),
                     phaseName(t.getBookState()), onOrder, Math.min(owned, target), target));
@@ -1475,13 +1620,13 @@ public class BazaarFlipper implements Feature {
             Book book = entry.getKey();
             Task t = entry.getValue();
             lines.add(book.getRomanLevel(book.level()) + ": " + t.getBookState()
-                    + " (remaining=" + t.getAmountToOrder() + ")");
+                    + " (eksik=" + missingUnits(book) + ")");
         }
         return lines;
     }
 
     private boolean shouldStore(Book book) {
-        return task.get(book).shouldStore();
+        return hasStorableInInventory(book);
     }
 
     private void resetCombineCounters() {
@@ -1536,9 +1681,8 @@ public class BazaarFlipper implements Feature {
         stateEnteredMs = System.currentTimeMillis();
         lastProgressMs = stateEnteredMs;
         debug("Book state changed: " + book + " | " + old + " -> " + target
-                + " remaining=" + t.getAmountToOrder()
-                + " inv=" + t.inInventory
-                + " ec=" + t.inEnderChest);
+                + " eksik=" + missingUnits(book)
+                + " " + BookLedger.summary(book));
         dumpTasks();
     }
 
@@ -1561,6 +1705,9 @@ public class BazaarFlipper implements Feature {
         for (Map.Entry<Book, Task> entry : task.entrySet()) {
             if (entry.getValue().getBookState() != target) continue;
             if (hasUnstoredBooksForName(entry.getKey().name())) continue;
+            // Cekic korumasi: kardes hattin envanterde kitabi varken
+            // birlestirmeye girme, yoksa onun kitaplarini yutariz.
+            if (target == BookState.COMBINE && siblingHoldsInventory(entry.getKey())) continue;
             return entry.getKey();
         }
         return null;
@@ -1581,7 +1728,26 @@ public class BazaarFlipper implements Feature {
         for (Map.Entry<Book, Task> entry : task.entrySet()) {
             if (!entry.getKey().name().equals(name)) continue;
             if (entry.getValue().getBookState() != BookState.STORE) continue;
-            if (entry.getValue().inInventory > 0) return true;
+            if (hasStorableInInventory(entry.getKey())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Bu isimden BASKA bir hattin envanterde kitabi var mi?
+     *
+     * COMBINE defter kullanmiyor, envanterde ne gorurse cekice atiyor. Kardes
+     * hattin (or. 2to5) envanterde bekleyen bir Wisdom III'u varsa, 1to5
+     * birlestirmeye girdiginde onu da yutar - kardes hat kitabini kaybeder ve
+     * yerine yenisini satin alir. Zincir kilidi bu yuzden yalnizca STORE'a
+     * degil, envanterde kitabi olan HER kardes hatta bakar.
+     */
+    private boolean siblingHoldsInventory(Book line) {
+        for (Map.Entry<Book, Task> entry : task.entrySet()) {
+            Book other = entry.getKey();
+            if (other.equals(line)) continue;
+            if (!other.name().equals(line.name())) continue;
+            if (!BookLedger.of(other, BookLedger.Place.INVENTORY).isEmpty()) return true;
         }
         return false;
     }
@@ -1602,125 +1768,46 @@ public class BazaarFlipper implements Feature {
         stateBooks.addAll(booksInState(BookState.SELL));
 
         for (Book book : stateBooks) {
-            if (task.get(book).getAmountToOrder() < 0) continue;
             counts.merge(book.name(), 1, Integer::sum);
         }
 
         // ESKİ KOD: isim sayısı >1 ise o isimden TÜM görevleri siliyordu - alım
         // fazındaki (kitapları çoktan satın alınmış) kardeş görev de siliniyor ve
         // o kitaplar sahipsiz kalıyordu. Artık sadece SELL'deki görevler silinir.
-        tasks.entrySet().removeIf(entry ->
-                entry.getValue().getBookState() == BookState.SELL
-                        && counts.getOrDefault(entry.getKey().name(), 0) > 1
-        );
-    }
-
-    /**
-     * Config'te bu isim için tanımlı seviyeler (ör. "Ultimate Wise" -> {1, 2}).
-     * Bu seviyelerdeki kitaplar bir görevin meşru stoğudur, artık değildir.
-     */
-    private Set<Integer> configuredLevelsFor(String name) {
-        Set<Integer> levels = new HashSet<>();
-        for (Book b : GoofyConfig.INSTANCE.books) {
-            if (!b.name().equals(name)) continue;
-            // Kapatilmis hat "yapilandirilmis" degildir. Sayilsaydi o seviye
-            // leftoverLevels'tan dislanir ama onu sahiplenen bir gorev de
-            // olmazdi: depodaki o kitaplar hicbir zaman goruilmez, hicbir zaman
-            // cekilmez, sonsuza kadar depoda kalirdi.
-            if (!GoofyConfig.isBookEnabled(b)) continue;
-            levels.add(b.level());
+        List<Book> doomed = new ArrayList<>();
+        for (Map.Entry<Book, Task> entry : tasks.entrySet()) {
+            if (entry.getValue().getBookState() != BookState.SELL) continue;
+            if (counts.getOrDefault(entry.getKey().name(), 0) <= 1) continue;
+            doomed.add(entry.getKey());
         }
-        return levels;
+        // Gorevle birlikte defter kaydi da gitmeli, yoksa kapanmis bir hattin
+        // adresleri defterde kalir ve sonraki hat onlari "baskasinin" sanar.
+        for (Book book : doomed) dropLine(book);
     }
 
-    /** Bu kitap, ismi için config'te tanımlı EN DÜŞÜK seviye mi? (artık kredisi ona yazılır) */
-    private boolean isLowestConfiguredLevel(Book book) {
-        for (Book b : GoofyConfig.INSTANCE.books) {
-            if (!b.name().equals(book.name())) continue;
-            // KAPATILMIS hat "yapilandirilmis" sayilmaz. Sayilsaydi: level 1
-            // kapali + level 2 acikken hicbir gorev "en dusuk seviye" olmaz,
-            // ara seviye artiklar hic kredilenmez ve Only Sell'de o gorev
-            // "elin bos" diye silinir - depodaki kitaplar orada kalirdi.
-            if (!GoofyConfig.isBookEnabled(b)) continue;
-            if (b.level() < book.level()) return false;
-        }
-        return true;
-    }
 
-    /**
-     * Taban ile satış seviyesi arasında kalan ve config'te KENDİ girdisi olmayan
-     * seviyeler. Bu seviyelerdeki kitaplar hiçbir görevin stoğu değildir; önceki
-     * turlardan kalmışlardır (sellLevel=5 ve config {1,2} iken: 3 ve 4).
-     */
-    private List<Integer> leftoverLevels(Book book) {
-        Set<Integer> configured = configuredLevelsFor(book.name());
-        List<Integer> levels = new ArrayList<>();
-        for (int i = book.level() + 1; i < book.sellLevel(); i++) {
-            if (configured.contains(i)) continue;
-            levels.add(i);
-        }
-        return levels;
-    }
 
-    /** Envanterdeki artıkların TABAN SEVİYE cinsinden birim değeri (III = 4, IV = 8...). */
-    private int leftoverUnitsInInventory(Book book) {
-        int units = 0;
-        for (int i : leftoverLevels(book)) {
-            int count = inventoryScanner.findLoreInv(book.getRomanLevel(i)).size();
-            if (count == 0) continue;
-            units += count * (1 << (i - book.level()));
-        }
-        return units;
-    }
 
-    /** Depoda (açık olan sayfada) duran artık kitapların slotları. */
-    private List<Integer> leftoverContainerSlots(Book book) {
-        List<Integer> slots = new ArrayList<>();
-        for (int i : leftoverLevels(book)) {
-            slots.addAll(inventoryScanner.findLoreContainer(book.getRomanLevel(i)));
-        }
-        return slots;
-    }
-
-    /**
-     * Depodaki artıkları birim olarak sipariş miktarından düşer. Sadece o ismin
-     * en düşük seviyeli görevine yazılır ki iki paralel görev aynı artığı iki kez
-     * saymasın. Envanterdeki artıklar processData'da düşüldüğü için burada
-     * yalnızca container taranır.
-     */
-    private void creditLeftoverUnitsFromContainer(List<Book> bookList) {
-        for (Book book : bookList) {
-            if (!isLowestConfiguredLevel(book)) continue;
-            Task t = task.get(book);
-            if (t == null) continue;
-
-            int units = 0;
-            for (int i : leftoverLevels(book)) {
-                int count = inventoryScanner.findLoreContainer(book.getRomanLevel(i)).size();
-                if (count == 0) continue;
-                units += count * (1 << (i - book.level()));
-            }
-            if (units == 0) continue;
-
-            t.addUnitCredit(units);
-            // Bu kitaplar DEPODA duruyor: ANVIL'in ugrayip onlari cekmesi gerek.
-            t.storageLeftover = true;
-            debug(book.name() + " icin depoda " + units + " birimlik ara seviye kitap bulundu, siparis miktarindan dusuldu");
-        }
-    }
-
-    /**
-     * ONLY SELL açıkken başlatıldığında, config'teki her hat için SİPARİŞ
-     * MİKTARI 0 olan bir görev açar.
+    /*
+     * ARTIK KREDI MAKINESI SILINDI.
      *
-     * NEDEN 0: getAmountToOrder() = 0 - (depodaki + envanterdeki), yani her
-     * zaman <= 0, yani isCompleted() her zaman true. IDLE bu görevleri SELECTED
-     * dalında görür görmez ANVIL'e yollar - BAZAAR_NAVIGATION'a, yani yeni
-     * sipariş açmaya, hiçbir koşulda giremezler. "Alma, sadece elindekini bitir"
-     * kuralı böylece görev seviyesinde garanti altına alınır.
+     * Eskiden burada leftoverUnitsInInventory / leftoverContainerSlots /
+     * creditLeftoverUnitsFromContainer vardi: ara seviye kitaplari sayip
+     * "birim kredisi" olarak siparis miktarindan dusuyorlardi. Hepsi tahmin
+     * uzerine kuruluydu ve sahiplik bilgisi yoktu.
      *
-     * Depoda ne olduğunu henüz bilmediğimiz için HER hat için görev açılır;
-     * eli boş çıkanlar STARTUP_CHECK bitince finishOnlySellStartup() ile silinir.
+     * Artik ara seviye kitaplar da defterde, KENDI SEVIYELERIYLE ve ADRESLERIYLE
+     * duruyor. Birim degeri BookLedger.units() icinde hesaplaniyor, ayri bir
+     * kredi kavramina gerek kalmadi.
+     */
+
+    /**
+     * ONLY SELL açıkken başlatıldığında config'teki her hat için görev açar.
+     *
+     * Gorevler SADECE processData'da doguyordu ve Only Sell orayi bastan
+     * kesiyordu; sonuc olarak gorev haritasi bos kaliyor, makro depoya bakip
+     * oldugu yerde duruyordu. Burada acilan gorevlerin onOrder'i 0'dir ve
+     * hicbir zaman artmaz, yani bu hatlar hicbir kosulda yeni siparis acamaz.
      */
     private void seedOnlySellTasks() {
         if (onlySellSeeded || GoofyConfig.INSTANCE == null) return;
@@ -1729,22 +1816,8 @@ public class BazaarFlipper implements Feature {
         for (Book book : GoofyConfig.INSTANCE.books) {
             if (!GoofyConfig.isBookEnabled(book)) continue;
             if (task.containsKey(book)) continue;
-
-            Task fresh = new Task(0);
-
-            // Envanterde duran ARA SEVIYE kitaplari birim olarak yaz. Depodakiler
-            // STARTUP_CHECK icinde creditLeftoverUnitsFromContainer ile eklenir;
-            // orada bilerek sadece konteyner taraniyor, cift sayim olmasin diye.
-            if (isLowestConfiguredLevel(book)) {
-                int leftover = leftoverUnitsInInventory(book);
-                if (leftover > 0) {
-                    fresh.addUnitCredit(leftover);
-                    debug("only sell: " + book.name() + " icin envanterde " + leftover + " birim ara seviye var");
-                }
-            }
-
-            task.put(book, fresh);
-            debug("only sell: " + book.getRomanLevel(book.level()) + " icin 0 siparisli gorev acildi");
+            task.put(book, new Task());
+            debug("only sell: " + book.getRomanLevel(book.level()) + " icin gorev acildi");
         }
 
         ActionLog.add(ActionLog.Tag.SYSTEM,
@@ -1752,26 +1825,19 @@ public class BazaarFlipper implements Feature {
     }
 
     /**
-     * STARTUP_CHECK iki depo sayfasını da taradıktan sonra çalışır.
+     * STARTUP_CHECK iki depo sayfasini da dogruladiktan sonra calisir.
      *
-     * 1) Eli tamamen boş görevleri siler - ne envanterde, ne depoda, ne de ara
-     *    seviye kredisinde tek kitabı olmayan hat için yapacak iş yoktur;
-     *    silinmezse makro sahibi olmadığı kitap için boşuna çekiç açardı.
-     * 2) Kalan her görevi ANVIL'e yollar. ANVIL gerekiyorsa depodan çeker,
-     *    COMBINE birleştirir, SELL satar.
+     * Defterde tek bir kitabi bile olmayan hatlar kapatilir; kalanlar cekice
+     * yollanir. Only Sell'de yeni siparis acilmadigi icin eksik tamamlanmaz,
+     * elde ne varsa o birlestirilip satilir.
      */
     private void finishOnlySellStartup() {
         if (!OnlySellMode.isEnabled()) return;
 
-        List<Book> empty = new ArrayList<>();
-        for (Map.Entry<Book, Task> entry : task.entrySet()) {
-            Task t = entry.getValue();
-            if (t.inEnderChest + t.inInventory + t.getUnitCredit() > 0) continue;
-            empty.add(entry.getKey());
-        }
-        for (Book book : empty) {
+        for (Book book : new ArrayList<>(task.keySet())) {
+            if (heldUnits(book) > 0) continue;
             debug("only sell: " + book.getRomanLevel(book.level()) + " icin elde kitap yok, gorev kapatildi");
-            task.remove(book);
+            dropLine(book);
         }
 
         if (task.isEmpty()) {
@@ -1780,9 +1846,8 @@ public class BazaarFlipper implements Feature {
         }
 
         for (Book book : new ArrayList<>(task.keySet())) {
-            Task t = task.get(book);
             ActionLog.add(ActionLog.Tag.ANVIL, book.name() + " " + book.getRomanLevel(book.level())
-                    + ": " + (t.inInventory + t.inEnderChest) + " on hand, combining");
+                    + ": " + heldUnits(book) + " units on hand, combining");
             editStateBook(book, BookState.ANVIL);
         }
         ActionLog.add(ActionLog.Tag.SYSTEM, "only sell: " + task.size() + " line(s) have stock to finish");
@@ -1874,46 +1939,54 @@ public class BazaarFlipper implements Feature {
 
             int fullAmount = book.getQtyAmount(book.level());
 
-            // Elde zaten duran ara seviye artıklar birim olarak düşülür ki toplam
-            // havuz tam 2'nin kuvveti olsun ve zincir sonunda artık kalmasın.
-            int credit = (isLowestConfiguredLevel(book) && !nameInChain) ? leftoverUnitsInInventory(book) : 0;
+            // GOREVI ONCE AC, SONRA ELDEKINI SAY.
+            // Defter Book'a gore calisiyor, o yuzden sahiplenme gorev acildiktan
+            // sonra yapilir. Zincirdeki bir isim icin eldeki stok sayilmaz:
+            // o kitaplar su an birlestirme havuzunda dolasiyor, sahipsiz degil.
+            Task newTask = new Task();
+            task.put(book, newTask);
+
+            int credit = 0;
+            if (!nameInChain) {
+                // Envanterde SAHIPSIZ duran (taban ya da ara seviye) kitaplari
+                // bu hatta yaz. Boylece 16 lazimken elde 1 tane dururken 15
+                // siparis acilir ve havuz tam 2'nin kuvveti kalir.
+                adoptUnownedInventory(book);
+                credit = heldUnits(book);
+            }
+
             int amount = Math.max(0, fullAmount - credit);
 
             double unitCost = flipItem.totalCost() / fullAmount;
             double actualCost = unitCost * amount;
 
-            if (amount > 0 && purse < actualCost) continue;
+            if (amount > 0 && purse < actualCost) {
+                // Para yetmiyor: gorevi kapat ama DEFTERI SILME. Depoda duran
+                // kitaplarin sahiplik kaydi silinirse bir sonraki turda o kitaplar
+                // sahipsiz gorunur ve hat elde 16 tane varken 16 tane daha siparis
+                // eder - havuz 32'ye cikip 2'nin kuvveti olmaktan cikardi.
+                task.remove(book);
+                continue;
+            }
 
             debug("User has enough money " + book.name());
             purse -= actualCost;
             debug("new purse = " + purse);
 
-            Task newTask = new Task(amount);
-
-            // Envanterde bu kitaptan (TAM taban seviyede) sahipsiz duran varsa onları
-            // da say - böylece 8 adet lazımken elde 1 tane dururken 8 yerine 7 sipariş
-            // açılır ve havuz tek sayıya kaymaz. STARTUP_CHECK aynı sayımı ilk açılışta
-            // yaptığı için orada tekrar saymayalım diye firstStartUp'ta atlanır.
-            int onHand = (firstStartUp || nameInChain) ? 0 : inventoryScanner.findLoreInv(book.getRomanLevel(book.level())).size();
-            if (onHand > 0) {
-                newTask.addInInventory(onHand);
-                debug(book.name() + " icin envanterde " + onHand + " adet taban seviye kitap bulundu, siparis o kadar azaltildi");
-            }
-
-            task.put(book, newTask);
             TradeHistory.begin(book);
             ActionLog.add(ActionLog.Tag.BUY, book.getRomanLevel(book.level())
                     + " line opened - target " + amount);
 
             if (credit > 0) {
-                ChatUtils.clientMessage(book.name() + " icin elde " + credit + " birim ara seviye kitap var, siparis " + fullAmount + " yerine " + amount + " adet aciliyor.");
+                ChatUtils.clientMessage(book.name() + " icin elde " + credit
+                        + " birim kitap var, siparis " + fullAmount + " yerine " + amount + " adet aciliyor.");
             }
 
-            if (newTask.isCompleted()) {
-                // Sipariş gerekmiyor, elde yeterli var: doğrudan zincire gir.
+            if (isCompleted(book)) {
+                // Siparis gerekmiyor, elde yeterli var: dogrudan zincire gir.
                 editStateBook(book, BookState.ANVIL);
-            } else if (newTask.shouldStore()) {
-                // Elde kısmi stok var: önce onu depola, sonra kalanı sipariş et.
+            } else if (hasStorableInInventory(book)) {
+                // Elde kismi stok var: once onu depola, sonra kalani siparis et.
                 editStateBook(book, BookState.STORE);
                 newTask.setEarlyStore(true);
             }
@@ -1925,43 +1998,25 @@ public class BazaarFlipper implements Feature {
 
 
     /**
-     * AÇIK OLAN depo sayfasını tarar ve hiçbir görevin sayacında olmayan kitapları
-     * sahibi olabilecek göreve yazar. Tek yönlü ve güvenlidir:
+     * Depo hangi sebeple acilirsa acilsin, o sayfada SAHIPSIZ duran kitaplari
+     * eksigi olan hatlara yazar.
      *
-     *  - Sadece EKLER, asla eksiltmez. Bir sayfada kitap görmemek "o kitap yok"
-     *    demek değildir (diğer sayfada olabilir). Sayaç şişmesi zaten ANVIL'de
-     *    iki sayfa da tarandıktan sonra clearEnderChest() ile düzeltiliyor.
-     *  - "Bu sayfadaki fiziksel adet > tüm görevlerin toplam iddiası" ise aradaki
-     *    fark KESİNLİKLE sahipsizdir, çünkü toplam iddia iki sayfayı birden kapsar.
-     *    En kötü ihtimalle az sayar, asla fazla saymaz. Bu yüzden tekrar tekrar
-     *    çağrılması güvenlidir: kitap deftere girdiği anda "iddia" da artar.
-     *  - Hiçbir görev ihtiyacından fazlasını almaz: 16 gerekirken depoda 17 varsa
-     *    16'sı sayaca girer, 1 tanesi sahipsiz kalır ve eksik 0 olur (eskiden -1).
-     *
-     * Sadece TABAN seviyeler taranır; ara seviye artıklar STARTUP_CHECK'te birim
-     * olarak kredilendiği için burada tekrar sayılırsa çift sayım olurdu.
+     * ESKI HALI sayac tabanliydi ve yalnizca EKLIYORDU, hicbir zaman
+     * eksiltmiyordu - sisen sayac kendi kendine duzelmiyordu. Artik adres
+     * tabanli: bir slot ya bir hatta kayitlidir ya sahipsizdir, arada gri alan
+     * yok. Yine yalnizca ekler, ama eksiltme isi de artik dogrulama turlarinda
+     * (resyncStoragePage) yapiliyor.
      */
-    private void syncOpenStoragePage() {
-        for (Map.Entry<Book, Task> entry : task.entrySet()) {
-            Book book = entry.getKey();
-            Task t = entry.getValue();
+    private void adoptOnOpenStoragePage() {
+        for (Book book : new ArrayList<>(task.keySet())) {
+            if (missingUnits(book) <= 0) continue;
 
-            int needed = t.getAmountToOrder();
-            if (needed <= 0) continue; // bu görev zaten dolu, kitap almasına gerek yok
+            int adopted = adoptUnownedHere(book, currentStoragePage);
+            if (adopted <= 0) continue;
 
-            int physicalHere = inventoryScanner.findLoreContainer(book.getRomanLevel(book.level())).size();
-            if (physicalHere <= 0) continue;
-
-            // Aynı isim + aynı taban seviyeye sahip başka görev yok (harita anahtarı
-            // Book), yani bu seviyedeki iddia sadece bu görevin iddiasıdır.
-            int unowned = physicalHere - t.inEnderChest;
-            if (unowned <= 0) continue;
-
-            int take = Math.min(unowned, needed);
-            t.addInEnderChest(take);
-            ChatUtils.clientMessage("Depoda " + take + "x " + book.getRomanLevel(book.level())
-                    + " sahipsiz kitap bulundu, siparis miktarindan dusuldu (kalan eksik: "
-                    + t.getAmountToOrder() + ").");
+            ChatUtils.clientMessage("Depoda " + adopted + "x " + book.name()
+                    + " sahipsiz kitap bulundu, hatta yazildi (kalan eksik: "
+                    + missingUnits(book) + ").");
         }
     }
 
@@ -1979,7 +2034,11 @@ public class BazaarFlipper implements Feature {
 
     private void openEnderChest(boolean useSecondPage) {
         if (isStorageOpen()) return;
-        debug("openEnderChest");
+        // HANGI SAYFAYI ACTIGIMIZI KAYDET. Defter adresleri sayfaya gore
+        // anlamli; acik sayfayi tahmin edersek kitaplari yanlis sayfaya
+        // yazariz ve ANVIL onlari bir daha asla bulamaz.
+        currentStoragePage = placeOf(useSecondPage);
+        debug("openEnderChest -> " + currentStoragePage);
         if (useSecondPage) {
             minecraft.player.connection.sendCommand(GoofyConfig.INSTANCE.secondPage);
             return;
@@ -1999,7 +2058,7 @@ public class BazaarFlipper implements Feature {
         // Tabelaya gelene kadar (depo taraması sayesinde) hedef dolmuş olabilir.
         // Negatif/sıfır miktar yazmak Hypixel'de ya hata verir ya da havuzu tek
         // sayıya kaydırırdı; artık sipariş hiç açılmıyor.
-        int orderAmount = signTask.getAmountToOrder();
+        int orderAmount = missingUnits(activeBook);
         if (orderAmount <= 0) {
             debug("siparis gerekmiyor (eksik=" + orderAmount + "), tabela iptal ediliyor");
             minecraft.setScreen(null);
@@ -2008,6 +2067,11 @@ public class BazaarFlipper implements Feature {
             return;
         }
 
+        // onOrder BURADA YAZILMAZ. Tabela ile onay arasinda makro takilirsa
+        // (25 sn zaman asimi -> RECOVERY) siparis hic acilmamis olur ama
+        // onOrder dolu kalir: eksik 0 gorunur, hat bos elle zincire girer ve
+        // sessizce kapanir. Kayit siparis GERCEKTEN acildiginda, Confirm
+        // tiklamasinda tutuluyor.
         lastOrderAmount = orderAmount;
         String amountToOrder = String.valueOf(orderAmount);
         if (minecraft.screen instanceof AbstractSignEditScreen signScreen) {
@@ -2117,6 +2181,33 @@ public class BazaarFlipper implements Feature {
         OnlySellMode.setPhase(next);
     }
 
+    /**
+     * Claim sonrasi envanteri tarar ve YENI kitaplari bu hattin defterine yazar.
+     *
+     * Zaten herhangi bir hatta kayitli adresler atlanir: kendi eski kitabimizi
+     * ikinci kez saymayalim, kardes hattin kitabini da calmayalim.
+     *
+     * @return deftere yeni yazilan kitap sayisi
+     */
+    private int registerClaimed(Book book, int max) {
+        int added = 0;
+        String baseName = book.getRomanLevel(book.level());
+
+        for (int[] hit : inventoryScanner.findLoreInvAddressed(baseName)) {
+            // EN FAZLA SIPARIS KADAR. Sinirsiz olsaydi kardes hattin cekicte
+            // yeni dovdugu ara seviye kitaplar (henuz defterde degiller) bu
+            // hatta yazilirdi: kardes hat kendi kitabini kaybeder, bu hat da
+            // gelmemis kitaplari gelmis sanip siparisini eksik gosterirdi.
+            if (added >= max) break;
+            if (heldUnits(book) >= targetUnits(book)) break;
+            int address = hit[0];
+            if (BookLedger.isOwned(BookLedger.Place.INVENTORY, address)) continue;
+            BookLedger.add(book, BookLedger.Place.INVENTORY, address, book.level());
+            added++;
+        }
+        return added;
+    }
+
     /** Config'te bu satis adina ("Wisdom V") sahip kitabi bulur. */
     private Book findBookBySellName(String sellName) {
         if (sellName == null || GoofyConfig.INSTANCE == null) return null;
@@ -2150,19 +2241,38 @@ public class BazaarFlipper implements Feature {
         bazaarMonitor.finishSell(book);
     }
 
+    /**
+     * ALIM siparisi outbid yendi.
+     *
+     * DIKKAT: BazaarMonitor'un HTTP thread'inden cagriliyor. Burada gorev
+     * haritasina DOKUNULMAZ - editStateBook -> dumpTasks zinciri haritayi
+     * geziyor, tick thread'i ayni anda put/remove yapiyor ve bu
+     * ConcurrentModificationException atiyordu. Istisna CompletableFuture
+     * icinde sessizce yutuldugu icin o turdaki diger siparisler hic taranmiyor,
+     * outbid bayragi da temizlenmedigi icin ayni uyari her turda tekrar
+     * ediyordu. Artik yalnizca thread-safe kuyruga yazilir; isi IDLE yapar.
+     */
     private void handleOutbid(Book book) {
-        Task t = task.get(book);
-        if (t == null || !BUY_PHASE.contains(t.getBookState())) {
-            // Görev artık alım fazında değil: eski bir sipariş kaydından gelen bu
-            // uyarı, birleştirme zincirini ortasından keserdi.
-            debug("stale outbid ignored for " + book);
-            bazaarMonitor.finish(book);
-            return;
+        pendingBuyOutbids.add(book);
+    }
+
+    /** Kuyrukta bekleyen alim outbid'lerini TICK thread'inde isler. */
+    private void drainBuyOutbids() {
+        Book book;
+        while ((book = pendingBuyOutbids.poll()) != null) {
+            Task t = task.get(book);
+            if (t == null || !BUY_PHASE.contains(t.getBookState())) {
+                // Görev artık alım fazında değil: eski bir sipariş kaydından gelen bu
+                // uyarı, birleştirme zincirini ortasından keserdi.
+                debug("stale outbid ignored for " + book);
+                bazaarMonitor.finish(book);
+                continue;
+            }
+            debug("Found outbid:" + book.getRomanLevel(book.level()));
+            TradeHistory.outbid(book);
+            ActionLog.add(ActionLog.Tag.OUTBID, book.getRomanLevel(book.level()) + " was outbid");
+            editStateBook(book, BookState.OUTBID);
         }
-        debug("Found outbid:" + book.getRomanLevel(book.level()));
-        TradeHistory.outbid(book);
-        ActionLog.add(ActionLog.Tag.OUTBID, book.getRomanLevel(book.level()) + " was outbid");
-        editStateBook(book, BookState.OUTBID);
     }
 
 
@@ -2297,61 +2407,33 @@ public class BazaarFlipper implements Feature {
     }
 
 
+    /**
+     * Bir kitap hattinin DURUMU.
+     *
+     * ESKIDEN burada "envanterde 6, depoda 10" gibi sayaclar vardi. Kitaplar
+     * birbirinin ayni oldugu icin o sayaclar bir kurguydu ve kaydiklarinda
+     * kimse fark etmiyordu. Artik elde ne oldugu BookLedger'da ADRESLERIYLE
+     * duruyor; burada yalnizca sayilamayan sey kaliyor: bazaar'da bekleyen
+     * siparis.
+     */
     private class Task {
         private BookState bookState = BookState.SELECTED;
-        private int amountToOrder;
-        private int inEnderChest;
-        private int inInventory;
-        /** Elde zaten duran ara seviye kitapların taban seviye cinsinden birim değeri. */
-        private int unitCredit;
-        private boolean shouldCheckSecondPage = false;
+
+        /** Acik alim siparisinde bekleyen TABAN SEVIYE adet. */
+        private int onOrder = 0;
+
         private boolean earlyAction = false;
         private boolean earlyStore = false;
-        /** COMBINE takıldığında depo bir kez yeniden kontrol edildi mi? */
+        /** COMBINE takildiginda depo bir kez yeniden kontrol edildi mi? */
         private boolean anvilRecheckAttempted = false;
-        /** ANVIL, bu takılmada depo sayfalarının ikisine de baktı mı? */
-        private boolean otherPageChecked = false;
-
-        private boolean isAnvilRecheckAttempted() {
-            return anvilRecheckAttempted;
-        }
-
-        private void setAnvilRecheckAttempted(boolean anvilRecheckAttempted) {
-            this.anvilRecheckAttempted = anvilRecheckAttempted;
-        }
-
-        private boolean isOtherPageChecked() {
-            return otherPageChecked;
-        }
-
-        private void setOtherPageChecked(boolean otherPageChecked) {
-            this.otherPageChecked = otherPageChecked;
-        }
-
-        /** Depoda bize ait kitap kalmadığı fiziksel olarak doğrulandığında çağrılır. */
-        private void clearEnderChest() {
-            this.inEnderChest = 0;
-        }
-
-        private boolean isShouldCheckSecondPage() {
-            return shouldCheckSecondPage;
-        }
-
-        private void setShouldCheckSecondPage(boolean shouldCheckSecondPage) {
-            this.shouldCheckSecondPage = shouldCheckSecondPage;
-        }
-
-        private boolean isEarlyAction() {
-            return earlyAction;
-        }
-
-        private void setEarlyAction(boolean earlyAction) {
-            this.earlyAction = earlyAction;
-        }
-
-        private Task(int amountToOrder) {
-            this.amountToOrder = amountToOrder;
-        }
+        /** ANVIL su an hangi depo sayfasindan cekiyor. */
+        private BookLedger.Place pullFrom = BookLedger.Place.STORAGE_1;
+        /** ANVIL iki sayfaya da bakti mi? (tek turda sonsuz sayfa cevirmeyi keser) */
+        private boolean bothPagesChecked = false;
+        /** ANVIL "envanter dolu" deyip kac kez geri dondu? */
+        private int anvilFullBounces = 0;
+        /** ANVIL bu ziyarette kac kez sahipsiz kitap sahiplendi? (dongu emniyeti) */
+        private int anvilAdoptions = 0;
 
         private BookState getBookState() {
             return bookState;
@@ -2361,56 +2443,229 @@ public class BazaarFlipper implements Feature {
             this.bookState = bookState;
         }
 
-        private void addInEnderChest(int inEnderChest) {
-            this.inEnderChest += inEnderChest;
+        private boolean isAnvilRecheckAttempted() {
+            return anvilRecheckAttempted;
         }
 
-        private void addInInventory(int inInventory) {
-            this.inInventory += inInventory;
+        private void setAnvilRecheckAttempted(boolean value) {
+            this.anvilRecheckAttempted = value;
         }
 
-        private void addUnitCredit(int units) {
-            this.unitCredit += units;
-            this.amountToOrder = Math.max(0, this.amountToOrder - units);
+        private boolean isEarlyAction() {
+            return earlyAction;
         }
 
-        private int getUnitCredit() {
-            return unitCredit;
-        }
-
-        private int getAmountToOrder() {
-            return amountToOrder - (inEnderChest + inInventory);
-        }
-
-        /** Depoda bu göreve ait ARA SEVİYE kitap görüldü mü? */
-        private boolean storageLeftover = false;
-        /** ANVIL "envanter dolu" deyip kac kez geri dondu? (Only Sell dongu emniyeti) */
-        private int anvilFullBounces = 0;
-
-        private boolean shouldCheckEnderChest() {
-            // inEnderChest yalnizca TABAN SEVIYE kitaplari sayar. Depoda sadece
-            // ara seviye (III, IV...) kitap varsa bu sayac 0'dir ama kitaplar
-            // orada durur. ANVIL'e ugramazsak IDLE dogrudan COMBINE'a gecer,
-            // cekic bos elle acilir ve hat "havuz eksik" diye dusurulur - kitaplar
-            // depoda curur. ANVIL ise leftoverContainerSlots ile onlari cekebiliyor.
-            if (storageLeftover) return true;
-            return inEnderChest > 0;
-        }
-
-        private boolean isCompleted() {
-            return getAmountToOrder() <= 0;
-        }
-
-        private boolean shouldStore() {
-            return inInventory > 0;
+        private void setEarlyAction(boolean value) {
+            this.earlyAction = value;
         }
 
         private boolean isEarlyStore() {
             return earlyStore;
         }
 
-        private void setEarlyStore(boolean earlyStore) {
-            this.earlyStore = earlyStore;
+        private void setEarlyStore(boolean value) {
+            this.earlyStore = value;
         }
+    }
+
+    // =====================================================================
+    // HAVUZ MATEMATIGI
+    //
+    // Tek kural: elimdekini taban seviye cinsinden say, hedeften cikar, farki
+    // siparis et. Boylece "kitap kayboldu" ile "kitap yari yolda kaldi" ayni
+    // hesaba iner - ikisi de "su kadar birim eksigim var" demektir.
+    // =====================================================================
+
+    /** Hattin hedefi kac taban seviye kitap. 1->5 icin 16. */
+    private int targetUnits(Book book) {
+        return book.getQtyAmount(book.level());
+    }
+
+    /** Elde FIZIKSEL olarak duran birim - defterden okunur, tahmin yok. */
+    private int heldUnits(Book book) {
+        return BookLedger.units(book);
+    }
+
+    private int onOrderOf(Book book) {
+        Task t = task.get(book);
+        return t == null ? 0 : Math.max(0, t.onOrder);
+    }
+
+    /** Daha kac birim eksik. Tamamlama siparisi TAM bu kadar acilir. */
+    private int missingUnits(Book book) {
+        return Math.max(0, targetUnits(book) - heldUnits(book) - onOrderOf(book));
+    }
+
+    /** Havuz tamam mi: bekleyen siparis yok ve elde hedef kadar birim var. */
+    private boolean isCompleted(Book book) {
+        return onOrderOf(book) <= 0 && heldUnits(book) >= targetUnits(book);
+    }
+
+    /** Depoda bu hatta kayitli kitap var mi? */
+    private boolean hasStorage(Book book) {
+        return !BookLedger.of(book, BookLedger.Place.STORAGE_1).isEmpty()
+                || !BookLedger.of(book, BookLedger.Place.STORAGE_2).isEmpty();
+    }
+
+    /** Envanterde bu hatta ait TABAN SEVIYE kitap var mi? (depolanabilecek olan) */
+    private boolean hasStorableInInventory(Book book) {
+        for (BookLedger.Holding h : BookLedger.of(book, BookLedger.Place.INVENTORY)) {
+            if (h.level() == book.level()) return true;
+        }
+        return false;
+    }
+
+    /** Depo sayfasinin defterdeki karsiligi. */
+    private BookLedger.Place placeOf(boolean secondPage) {
+        return secondPage ? BookLedger.Place.STORAGE_2 : BookLedger.Place.STORAGE_1;
+    }
+
+    /**
+     * ACIK olan depo sayfasini bu hat icin bastan yazar.
+     *
+     * Once o sayfanin defteri bosaltilir, sonra ekranda GERCEKTEN ne varsa
+     * yeniden yazilir. Yani defter gercege hizalanir, ustune eklenmez.
+     * Baska hatta kayitli slotlara dokunulmaz.
+     *
+     * @param budget en fazla kac sahipsiz kitap sahiplenilecek (-1 = sinirsiz)
+     * @return bu sayfada bu hat adina yazilan kitap sayisi
+     */
+    private int resyncStoragePage(Book book, BookLedger.Place place) {
+        // BOS GORUNEN SAYFAYI SILME.
+        //
+        // clearPlace geri donusu olmayan bir islem. Sandik icerigi henuz
+        // gelmemisse, /ec beklenenden baska bir sayfa acmissa ya da komut
+        // dusmusse ekranda hicbir kitap gormeyiz - ve o sayfanin TUM kayitlarini
+        // silersek fiziksel olarak orada duran kitaplar sahipsiz kalir. Kayit
+        // varken bos sayfa gormek bir SUPHEDIR, gercek degil: dokunma, uyar.
+        int visible = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            visible += inventoryScanner.findLoreContainer(book.getRomanLevel(lvl)).size();
+        }
+        if (visible == 0 && !BookLedger.of(book, place).isEmpty()) {
+            ledgerWarn(book, place + " bos gorundu ama kayit var - kayitlar korundu");
+            return -1;
+        }
+
+        BookLedger.clearPlace(book, place);
+
+        int written = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            for (int slot : inventoryScanner.findLoreContainer(book.getRomanLevel(lvl))) {
+                if (heldUnits(book) >= targetUnits(book)) return written;
+                if (BookLedger.ownedByOther(book, place, slot)) continue;
+                BookLedger.add(book, place, slot, lvl);
+                written++;
+            }
+        }
+        return written;
+    }
+
+    /**
+     * Envanteri bu hat icin bastan yazar. Cekic slotlari zaten disarida -
+     * findLoreInvAddressed yalnizca oyuncunun envanterine bakar.
+     */
+    private int resyncInventory(Book book) {
+        BookLedger.clearPlace(book, BookLedger.Place.INVENTORY);
+
+        int written = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            for (int[] hit : inventoryScanner.findLoreInvAddressed(book.getRomanLevel(lvl))) {
+                if (heldUnits(book) >= targetUnits(book)) return written;
+                int address = hit[0];
+                if (BookLedger.ownedByOther(book, BookLedger.Place.INVENTORY, address)) continue;
+                BookLedger.add(book, BookLedger.Place.INVENTORY, address, lvl);
+                written++;
+            }
+        }
+        return written;
+    }
+
+    /**
+     * Envanterde SAHIPSIZ duran kitaplari bu hatta yazar.
+     *
+     * Ekleyicidir - hicbir kaydi silmez. Depodan yeni cekilen kitaplar,
+     * relogdan sonra ortada kalanlar ve elle birakilmis parcalar boyle
+     * sahiplenilir. Baska hatta kayitli adreslere dokunmaz.
+     */
+    private int adoptUnownedInventory(Book book) {
+        int added = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            for (int[] hit : inventoryScanner.findLoreInvAddressed(book.getRomanLevel(lvl))) {
+                // HEDEFTEN FAZLASINI ALMA. Sinirsiz sahiplenirse ilk sirada
+                // gezen hat (1to5) paylasilan tum ara seviye kitaplari kapiyor,
+                // kardes hat (2to5) elini bos buluyor ve depoda duran kitaplar
+                // icin yeniden siparis aciyordu. Ustelik 32 birim toplayan hat
+                // 2'nin kuvveti olmaktan cikip zincir sonunda artik biraktiriyordu.
+                if (heldUnits(book) >= targetUnits(book)) return added;
+                if (BookLedger.isOwned(BookLedger.Place.INVENTORY, hit[0])) continue;
+                BookLedger.add(book, BookLedger.Place.INVENTORY, hit[0], lvl);
+                added++;
+            }
+        }
+        return added;
+    }
+
+    /** ACIK olan sayfadaki sahipsiz kitaplari bu hatta yazar. Ekleyicidir. */
+    private int adoptUnownedHere(Book book, BookLedger.Place page) {
+        int added = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            for (int slot : inventoryScanner.findLoreContainer(book.getRomanLevel(lvl))) {
+                if (heldUnits(book) >= targetUnits(book)) return added;
+                if (BookLedger.isOwned(page, slot)) continue;
+                BookLedger.add(book, page, slot, lvl);
+                added++;
+            }
+        }
+        return added;
+    }
+
+    /**
+     * Cekic turu bittiginde elde ne kaldiysa deftere yazar.
+     *
+     * BU METOT OKSUZ SORUNUNUN KALBI. Birlestirme sirasinda kitaplar surekli
+     * yer ve seviye degistiriyor, o yuzden COMBINE defteri kullanmiyor. Ama
+     * cekicten CIKARKEN elde kalan her parcanin yeniden bir ADRESI ve bir
+     * SAHIBI olmali:
+     *
+     *   - Sahibi olmali ki kardes hat (2to5) onu kendi kitabi sanip almasin.
+     *   - Adresi olmali ki eksik hesabi dogru ciksin: elde 1 tane Wisdom 4
+     *     varsa o 8 birim eder, hedef 16 ise tam 8 birim eksigiz demektir.
+     *
+     * Onceki envanter kayitlari silinip yeniden yazilir - cekicten sonra eski
+     * adresler zaten gecersiz.
+     */
+    private void registerCombineLeftovers(Book book) {
+        BookLedger.clearPlace(book, BookLedger.Place.INVENTORY);
+
+        int written = 0;
+        for (int lvl = book.level(); lvl < book.sellLevel(); lvl++) {
+            for (int[] hit : inventoryScanner.findLoreInvAddressed(book.getRomanLevel(lvl))) {
+                if (BookLedger.ownedByOther(book, BookLedger.Place.INVENTORY, hit[0])) continue;
+                BookLedger.add(book, BookLedger.Place.INVENTORY, hit[0], lvl);
+                written++;
+            }
+        }
+        if (written > 0) {
+            debug("[LEDGER] " + book.name() + " cekic sonrasi " + written
+                    + " artik parca deftere yazildi (" + BookLedger.summary(book) + ")");
+        }
+    }
+
+    /** Hat kapandi: hem gorev hem defter kaydi silinir. */
+    private void dropLine(Book book) {
+        task.remove(book);
+        BookLedger.clearLine(book);
+    }
+
+    /**
+     * Defter beklediginden farkli bir sey gordu - sessizce gecme, yaz.
+     *
+     * Oksuz kitabin nereden dogdugunu ancak boyle yakalayabiliriz: eski
+     * sistemde sayac kaydiginda hicbir alarm calmiyordu.
+     */
+    private void ledgerWarn(Book book, String what) {
+        debug("[LEDGER] " + book.name() + " " + book.getRomanLevel(book.level()) + ": " + what);
+        ActionLog.add(ActionLog.Tag.RECOVERY, book.name() + ": " + what);
     }
 }

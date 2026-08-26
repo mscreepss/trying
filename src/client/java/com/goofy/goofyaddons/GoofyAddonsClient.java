@@ -5,6 +5,7 @@ import com.goofy.goofyaddons.config.GoofyConfig;
 import com.goofy.goofyaddons.event.ChatHook;
 import com.goofy.goofyaddons.failsafes.FailsafeManager;
 import com.goofy.goofyaddons.features.FeatureManager;
+import com.goofy.goofyaddons.features.bookflipper.helper.BookLedger;
 import com.goofy.goofyaddons.features.bookflipper.helper.ItemCatalog;
 import com.goofy.goofyaddons.features.bookflipper.helper.TradeHistory;
 import com.goofy.goofyaddons.features.economy.EconomyTracker;
@@ -25,7 +26,7 @@ public class GoofyAddonsClient implements ClientModInitializer {
      * Dünyaya girince sohbette görünmüyorsa çalışan jar ESKİDİR - yeni kodun
      * hiçbiri devrede değil demektir.
      */
-    private static final String BUILD_TAG = "UI-12";
+    private static final String BUILD_TAG = "LEDGER-2";
 
     private static boolean greeted = false;
 
@@ -35,6 +36,7 @@ public class GoofyAddonsClient implements ClientModInitializer {
 
         GoofyConfig.load();
         BookPresets.load();
+        BookLedger.load();
         ActionLog.init();
         ChatHook.register();
         EconomyTracker.register();
@@ -60,6 +62,7 @@ public class GoofyAddonsClient implements ClientModInitializer {
             EconomyTracker.onTick();
             TradeHistory.onTick();
             ActionLog.onTick();
+            BookLedger.onTick();
             GoofyKeybinds.onTick();
         });
     }

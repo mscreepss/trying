@@ -66,8 +66,11 @@ public class TaskHud {
                     .append(" -> ").append(info.sellLevel());
             line.append("  |  ").append(info.phase());
             if (info.onOrder() > 0) line.append(": ").append(info.onOrder());
+            // "owned" artik defterden gelen BIRIM degeri: bir Wisdom 4, taban
+            // seviyesi 1 olan bir hat icin 8 birim sayilir. "in storage" yaniltiyordu,
+            // cunku bu sayi envanter + iki depo sayfasinin toplami.
             line.append("  |  ").append(info.owned()).append(" / ").append(info.target())
-                    .append(" in storage");
+                    .append(" units");
             lines.add(line.toString());
             if (lines.size() >= MAX_ROWS) break;
         }

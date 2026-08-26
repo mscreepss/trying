@@ -95,6 +95,90 @@ public class InventoryScanner {
         return slots;
     }
 
+    /**
+     * Envanterdeki eşleşmeler, HEM kalıcı adres HEM tıklama id'si ile.
+     *
+     * NEDEN İKİ NUMARA: bir kitabın ekrandaki tıklama id'si hangi ekranın açık
+     * olduğuna göre değişir (sandıkta 54-89, çekiçte 3-38). Deftere o numarayı
+     * yazarsak ekran değişince yanlış slotu gösterir. Kitabın envanterdeki KENDİ
+     * adresi (0-35) ise her ekranda aynıdır.
+     *
+     * DIKKAT - BURADA SLOT.INDEX KULLANILMAZ. Minecraft'ta Slot.index ekrana
+     * eklenme sirasidir, yani MENU ID'SIDIR; ekran degisince degisir. Deftere
+     * onu yazarsak kitabin adresi her ekranda baska bir sey gosterir.
+     *
+     * Kalici adres olarak "oyuncunun envanter slotlari arasinda kacinci"
+     * sayilir (0-35). Bu sira her ekranda ayni oldugu icin adres sabittir ve
+     * hicbir yeni Minecraft API'sine ihtiyac duymaz.
+     *
+     * @return her eşleşme için {kalıcı envanter adresi 0-35, tıklama id'si}
+     */
+    public List<int[]> findLoreInvAddressed(String string) {
+        List<int[]> out = new ArrayList<>();
+        Inventory playerInv = minecraft.player.getInventory();
+        AbstractContainerMenu menu = minecraft.player.containerMenu;
+
+        int address = 0;
+        for (int id = 0; id < menu.slots.size(); id++) {
+            Slot slot = menu.slots.get(id);
+            if (slot.container != playerInv) continue;
+            int here = address++;
+            ItemStack item = slot.getItem();
+            if (item.isEmpty()) continue;
+            ItemLore lore = item.get(DataComponents.LORE);
+            if (lore == null || !lore.lines().stream().anyMatch(l -> l.getString().equals(string))) continue;
+            out.add(new int[]{here, id});
+        }
+        return out;
+    }
+
+    /**
+     * Envanterdeki belirli bir ADRESİN şu anki tıklama id'si.
+     *
+     * @return tıklama id'si, ya da o adres bu ekranda görünmüyorsa -1
+     */
+    public int inventoryClickId(int address) {
+        Inventory playerInv = minecraft.player.getInventory();
+        AbstractContainerMenu menu = minecraft.player.containerMenu;
+
+        int seen = 0;
+        for (int id = 0; id < menu.slots.size(); id++) {
+            Slot slot = menu.slots.get(id);
+            if (slot.container != playerInv) continue;
+            if (seen++ == address) return id;
+        }
+        return -1;
+    }
+
+    /** Açık sandığın belirli bir slotunda bu lore'a sahip bir kitap var mı? */
+    public boolean containerSlotHas(int slot, String string) {
+        AbstractContainerMenu menu = minecraft.player.containerMenu;
+        if (slot < 0 || slot >= menu.slots.size() - 36) return false;
+        ItemStack item = menu.slots.get(slot).getItem();
+        if (item.isEmpty()) return false;
+        ItemLore lore = item.get(DataComponents.LORE);
+        if (lore == null) return false;
+        return lore.lines().stream().anyMatch(l -> l.getString().equals(string));
+    }
+
+    /** Envanterdeki belirli bir ADRESTE bu lore'a sahip bir kitap var mı? */
+    public boolean inventorySlotHas(int address, String string) {
+        Inventory playerInv = minecraft.player.getInventory();
+        AbstractContainerMenu menu = minecraft.player.containerMenu;
+
+        int seen = 0;
+        for (Slot slot : menu.slots) {
+            if (slot.container != playerInv) continue;
+            if (seen++ != address) continue;
+            ItemStack item = slot.getItem();
+            if (item.isEmpty()) return false;
+            ItemLore lore = item.get(DataComponents.LORE);
+            if (lore == null) return false;
+            return lore.lines().stream().anyMatch(l -> l.getString().equals(string));
+        }
+        return false;
+    }
+
     public List<Integer> findLoreContainer(String string) {
         List<Integer> slots = new ArrayList<>();
         AbstractContainerMenu menu = minecraft.player.containerMenu;
