@@ -122,6 +122,12 @@ public class BazaarFlipper implements Feature {
      * frenimiz var - yoksa makro saniyede birkac kez /bz komutu gonderir.
      */
     private long outbidSpaceRetryMs = 0;
+    /** Yer yetmedigi icin claim'in ertelenme araligi. */
+    private static final long OUTBID_SPACE_RETRY_MS = 15_000;
+    /** Kac ust uste ertelemeden sonra kullaniciya acikca haber verilir. */
+    private static final int SPACE_WARN_AFTER = 3;
+    /** Ust uste kac kez yer yetmedi. Basarili claim'de sifirlanir. */
+    private int outbidSpaceWaits = 0;
     /**
      * Envanter dolu ve birlestirilecek hicbir cift yokken ANVIL'e tekrar
      * girilmeyecek zaman. Yer acmak kullanicinin isi; o zamana kadar
@@ -270,6 +276,7 @@ public class BazaarFlipper implements Feature {
         bazaarMonitor.reset();
         isInventoryFull = false;
         outbidSpaceRetryMs = 0;
+        outbidSpaceWaits = 0;
         anvilFullRetryMs = 0;
         didRemoveOrder = false;
         claimedItems = false;
@@ -768,17 +775,48 @@ public class BazaarFlipper implements Feature {
                             // SIPARISE DOKUNMUYORUZ: bazaarda oldugu gibi duruyor,
                             // mallar kaybolmuyor, sonra claim edilebilir. Zincir
                             // (COMBINE) ilerledikce envanterde yer acilir.
+                            int freeSlots = inventoryScanner.getEmptyInventorySlots();
                             debug("claim icin yer yok (gereken=" + amount
-                                    + ", bos=" + inventoryScanner.getEmptyInventorySlots()
-                                    + "), siparis bekletiliyor");
+                                    + ", bos=" + freeSlots + "), siparis bekletiliyor");
                             ActionLog.add(ActionLog.Tag.OUTBID, bookToHandle.getRomanLevel(bookToHandle.level())
                                     + ": inventory too full to claim " + amount + " - waiting for space");
-                            outbidSpaceRetryMs = System.currentTimeMillis() + 15_000;
-                            isInventoryFull = true;
+
+                            // BURADA isInventoryFull KESINLIKLE SET EDILMEZ.
+                            //
+                            // O bayrak "bu gorevi yer acmasi icin STORE'a yolladim"
+                            // demek ve YALNIZCA IDLE'in STORE / ANVIL dallari onu
+                            // temizliyor. Bu dal ise gorevi hicbir yere yollamiyor -
+                            // kitap OUTBID'de kaliyor. Butun gorevler ayni anda
+                            // OUTBID'deyse (siparislerin hepsi outbid yendiginde
+                            // olan sey) ortada ne STORE ne ANVIL gorevi kalir, bayrak
+                            // asla temizlenmez ve IDLE bir daha OUTBID'e hic
+                            // giremez. Makro sessizce, mesajsiz, sonsuza kadar
+                            // IDLE'da oturur - watchdog da goremez cunku onun
+                            // IDLE kontrolu task.isEmpty() istiyor, gorevler ise
+                            // duruyor. Bekleme icin zaten outbidSpaceRetryMs var;
+                            // o kendi kendine doluyor, kilitlenme uretmiyor.
+                            outbidSpaceRetryMs = System.currentTimeMillis() + OUTBID_SPACE_RETRY_MS;
+
+                            // Envanterde kalici olarak yer yoksa (kullanicinin kendi
+                            // esyalari doldurmus) bu sonsuza kadar tekrar eder ve
+                            // kullanici NEDEN durdugunu bilemez. Birkac denemeden
+                            // sonra sohbete acikca yaz.
+                            outbidSpaceWaits++;
+                            if (outbidSpaceWaits == SPACE_WARN_AFTER) {
+                                ChatUtils.clientMessage("Envanterde yer yok: " + amount
+                                        + " kitap icin " + amount + " bos slot gerekiyor, "
+                                        + freeSlots + " tane var. Envanterde yer acmazsan"
+                                        + " bu siparis alinamaz.");
+                            }
+
                             minecraft.player.closeContainer();
                             state = State.IDLE;
                             return;
                         }
+                        // Yer bulundu: uyari sayaci sifirlanir, bir sonraki
+                        // sikisiklikta uyari bastan sayilsin.
+                        outbidSpaceWaits = 0;
+
                         click(slots.getFirst(), false);
                         if (amount == 0) {
                             debug("amount=0, returning early");
