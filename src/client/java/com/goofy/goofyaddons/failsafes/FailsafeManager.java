@@ -15,6 +15,7 @@ public class FailsafeManager {
 
     private FailsafeManager() {
         failsafes.add(new ScheduledReboot());
+        failsafes.add(new BazaarOutage());
         failsafes.add(sessionPlanner);
     }
 

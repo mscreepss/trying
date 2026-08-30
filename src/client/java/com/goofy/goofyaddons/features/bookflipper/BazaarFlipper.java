@@ -306,6 +306,16 @@ public class BazaarFlipper implements Feature {
     @Override
     public void resume() {
         enabled = true;
+        // DURAKLAMA SURESI "ILERLEME YOK" SAYILMAZ.
+        //
+        // Watchdog'un kum saatleri duvar saatine gore isliyor ama duraklarken
+        // onTick hic calismiyor, yani sayaclar durdugumuz sure boyunca da
+        // buyuyor. Sifirlanmazsa 60 saniyelik bir duraklamadan sonra makro
+        // devam eder etmez "30 saniyedir ilerleme yok" diye sahte alarm verip
+        // bosuna RECOVERY'ye giriyor - ve bu, gercek bir takilma icin ayrilmis
+        // uc denemeden birini harciyor.
+        stateEnteredMs = System.currentTimeMillis();
+        lastProgressMs = System.currentTimeMillis();
     }
 
     @Override
